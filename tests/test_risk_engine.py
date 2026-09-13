@@ -110,6 +110,35 @@ def test_onesided_cap_blocks_more_same_side(settings: Settings, now: datetime) -
     assert decision.reason is RejectReason.ONESIDED_CAP
 
 
+def test_onesided_cap_is_aggregate_across_windows(settings: Settings, now: datetime) -> None:
+    engine = RiskEngine(settings)
+    close = now + timedelta(minutes=10)
+    btc = yes_position("KXBTC15M-A", qty="50", px="0.50")  # $25 unpaired
+    snap = empty_snapshot(
+        settings,
+        positions={btc.market_ticker: btc},
+        unpaired_notional=btc.unpaired_notional(),
+        window_ids=frozenset({btc.event_ticker}),
+        open_notional=Decimal("25"),
+    )
+    eth = _intent(event="KXETH15M-B", price="0.50", count="40")  # +$20 → $45 > $30
+    decision = engine.evaluate(eth, snap, close_time=close, now=now)
+    assert decision.allowed is False
+    assert decision.reason is RejectReason.ONESIDED_CAP
+
+
+def test_open_breach_trips_kill_code(settings: Settings, now: datetime) -> None:
+    engine = RiskEngine(settings)
+    close = now + timedelta(minutes=10)
+    snap = empty_snapshot(settings, open_notional=Decimal("55"))
+    decision = engine.evaluate(_intent(), snap, close_time=close, now=now)
+    assert engine.kill_active
+    assert decision.reason is RejectReason.KILL_SWITCH
+    from kalshi_pbot.risk_engine import classify_kill
+
+    assert classify_kill(engine.kill_reason) == "open"
+
+
 def test_onesided_cap_allows_completing_other_side(settings: Settings, now: datetime) -> None:
     engine = RiskEngine(settings)
     close = now + timedelta(minutes=10)

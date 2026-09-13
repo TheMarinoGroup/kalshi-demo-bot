@@ -1,5 +1,5 @@
 import { useHud } from "./useHud";
-import type { HudSnapshot, WindowCard } from "./types";
+import type { HudSnapshot, Tone, UtilCell, WindowCard } from "./types";
 
 function money(n: number | null | undefined, digits = 2): string {
   if (n == null || Number.isNaN(n)) return "—";
@@ -12,10 +12,20 @@ function px(n: number | null | undefined): string {
   return n.toFixed(2);
 }
 
+function pct(n: number | null | undefined): string {
+  if (n == null || Number.isNaN(n)) return "—";
+  return `${(n * 100).toFixed(0)}%`;
+}
+
 function countdown(seconds: number): string {
   const s = Math.max(0, Math.floor(seconds));
   const m = Math.floor(s / 60);
   return `${String(m).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+}
+
+function signedCountdown(seconds: number): string {
+  const sign = seconds < 0 ? "+" : "";
+  return `${sign}${countdown(Math.abs(seconds))}`;
 }
 
 function cls(...parts: Array<string | false | undefined>): string {
@@ -58,43 +68,64 @@ function Meter({
   label,
   value,
   max,
-  warn,
+  tone,
   format = "money",
+  note,
 }: {
   label: string;
   value: number;
   max: number;
-  warn?: boolean;
+  tone?: Tone;
   format?: "money" | "count";
+  note?: string;
 }) {
-  const pct = max > 0 ? Math.min(100, (value / max) * 100) : 0;
+  const raw = max > 0 ? value / max : 0;
+  const pctBar = Math.min(100, Math.max(0, raw * 100));
+  const auto: Tone = raw >= 1 ? "red" : raw >= 0.8 ? "amber" : "green";
   const shown =
     format === "count" ? `${value} / ${max}` : `${money(value)} / ${money(max)}`;
   return (
     <div className="meter">
       <div className="meter-head">
         <span>{label}</span>
-        <span>{shown}</span>
+        <span className={cls("tone", tone ?? auto)}>
+          {shown} · {pct(raw)}
+        </span>
       </div>
       <div className="meter-track">
-        <div
-          className={cls("meter-fill", pct >= 80 || warn ? "hot" : pct >= 50 ? "warm" : "ok")}
-          style={{ width: `${pct}%` }}
-        />
+        <div className={cls("meter-fill", tone ?? auto)} style={{ width: `${pctBar}%` }} />
+      </div>
+      {note ? <div className="meter-note">{note}</div> : null}
+    </div>
+  );
+}
+
+function UtilChip({ cell }: { cell: UtilCell }) {
+  return (
+    <div className={cls("util-chip", cell.tone)}>
+      <span>{cell.label.toUpperCase()}</span>
+      <b>
+        {cell.label === "windows"
+          ? `${cell.value} / ${cell.max}`
+          : `${money(cell.value, cell.max >= 10 ? 0 : 2)} / ${money(cell.max, 0)}`}
+      </b>
+      <div className="util-track">
+        <div style={{ width: `${Math.min(100, cell.util * 100)}%` }} />
       </div>
     </div>
   );
 }
 
 function WindowPanel({ win }: { win: WindowCard }) {
+  const gateBad = win.gate_violation || (win.last_60s && win.new_risk_allowed);
   return (
-    <article className={cls("win", win.last_60s && "toxic", !win.live && "next")}>
+    <article className={cls("win", win.last_60s && "toxic", gateBad && "breach", !win.live && "next")}>
       <header>
         <div>
           <div className="win-series">{win.series}</div>
           <div className="win-ticker">{win.ticker}</div>
         </div>
-        <div className={cls("clock", win.last_60s && "warn")}>
+        <div className={cls("clock", win.last_60s && "warn", gateBad && "breach")}>
           <span>{win.live ? "TO CLOSE" : "OPENS"}</span>
           <strong>{countdown(win.seconds_to_close)}</strong>
         </div>
@@ -127,7 +158,13 @@ function WindowPanel({ win }: { win: WindowCard }) {
       </div>
       <Spark points={win.spark} />
       <footer>
-        {win.last_60s ? <span className="pill warn">LAST 60s — NO NEW RISK</span> : null}
+        {win.gate_violation ? (
+          <span className="pill breach">LAST 60s VIOLATION</span>
+        ) : win.last_60s ? (
+          <span className="pill warn">LAST 60s — NO NEW RISK</span>
+        ) : (
+          <span className="pill ok">NEW RISK ALLOWED</span>
+        )}
         <span className="muted">
           {win.open?.slice(11, 19)} → {win.close?.slice(11, 19)} UTC
         </span>
@@ -136,7 +173,242 @@ function WindowPanel({ win }: { win: WindowCard }) {
   );
 }
 
-function Desk({ snap, live, clock }: { snap: HudSnapshot; live: boolean; clock: Date }) {
+function RiskDesk({
+  snap,
+  onKill,
+}: {
+  snap: HudSnapshot;
+  onKill: () => void;
+}) {
+  const { risk, pnl, mode, kill, fees, gate, settle, extras } = snap;
+  const last = risk.last_fill;
+  const band = risk.settle_band?.length ? risk.settle_band : [60, 90];
+
+  return (
+    <aside className="col risk">
+      <h2>RISK DESK v1</h2>
+
+      <div className="panel mode-panel">
+        <label>1 · MODE</label>
+        <div className={cls("mode-badge", mode.hard_stop ? "hard" : mode.badge === "LIVE" ? "live" : "paper")}>
+          {mode.badge}
+        </div>
+        <div className="panel-note">
+          {mode.hard_stop
+            ? "LIVE WITHOUT APPROVAL — HARD STOP"
+            : mode.demo_submit
+              ? "PAPER desk · demo-submit is not production LIVE"
+              : "PAPER only · production LIVE requires explicit approval"}
+        </div>
+      </div>
+
+      <div className="bank">
+        <label>2 · BANKROLL</label>
+        <strong>{money(risk.bankroll, 0)}</strong>
+      </div>
+
+      <div className="panel">
+        <label>3 · CLIP / LAST FILL</label>
+        <div className="kv tight">
+          <div>
+            <span>BAND</span>
+            <b>
+              {money(risk.clip_min, 0)}–{money(risk.clip_max, 0)}
+            </b>
+          </div>
+          <div>
+            <span>DEF</span>
+            <b>{money(risk.clip, 0)}</b>
+          </div>
+        </div>
+        <div className="last-fill">
+          {last ? (
+            <>
+              <b className={cls("tone", snap.util.fill.tone)}>{money(last.notional)}</b>
+              <span>
+                {last.outcome.toUpperCase()} · {last.ticker.split("-").pop()} · {last.liquidity}
+              </span>
+            </>
+          ) : (
+            <span className="muted">No fills this session</span>
+          )}
+        </div>
+      </div>
+
+      <Meter
+        label="4 · OPEN NOTIONAL"
+        value={risk.open_notional}
+        max={risk.max_open}
+        tone={risk.open_tone}
+        note={risk.open_notional >= risk.max_open ? `≥ ${money(risk.max_open, 0)} KILL` : undefined}
+      />
+      <Meter
+        label="5 · WINDOWS IN FLIGHT"
+        value={risk.windows}
+        max={risk.max_windows}
+        format="count"
+        tone={snap.util.windows.tone}
+      />
+      <Meter
+        label="6 · ONE-SIDED / INCOMPLETE"
+        value={risk.unpaired}
+        max={risk.max_onesided}
+        tone={risk.onesided_tone}
+        note={
+          risk.unpaired > 0
+            ? `ABORT UNPAIRED · ${(risk.onesided_leg ?? "").toUpperCase()} ${risk.onesided_ticker ?? ""}`.trim()
+            : "flat — no incomplete pair"
+        }
+      />
+      <Meter
+        label="7 · DAILY PNL vs KILL"
+        value={Math.max(0, -risk.daily_pnl)}
+        max={risk.daily_kill}
+        tone={snap.util.daily_loss.tone}
+        note={`day ${money(pnl.daily)} incl. unsettled ${money(risk.unsettled_pnl)} until ${risk.unsettled_until}`}
+      />
+
+      <div className="panel">
+        <label>8 · FEE DRAG</label>
+        <div className="kv tight">
+          <div>
+            <span>TODAY</span>
+            <b>{money(fees.today, 4)}</b>
+          </div>
+          <div>
+            <span>TAKER</span>
+            <b>{money(fees.taker, 4)}</b>
+          </div>
+          <div>
+            <span>MAKER</span>
+            <b>{money(fees.maker, 4)}</b>
+          </div>
+          <div>
+            <span>CONFIRM</span>
+            <b className="warn">{fees.maker_pending_confirm ? "PEND $0" : "OK"}</b>
+          </div>
+        </div>
+        <div className="panel-note">{fees.note}</div>
+      </div>
+
+      <div className={cls("panel", gate.violation && "breach")}>
+        <label>9 · LAST-60s GATE</label>
+        <div className="kv tight">
+          <div>
+            <span>NEW RISK</span>
+            <b className={cls(gate.violation ? "down" : gate.new_risk_allowed ? "up" : "warn")}>
+              {gate.violation ? "VIOLATION" : gate.new_risk_allowed ? "ALLOWED" : "BLOCKED"}
+            </b>
+          </div>
+          <div>
+            <span>GATE</span>
+            <b>≤{gate.last_seconds}s</b>
+          </div>
+        </div>
+        <ul className="gate-list">
+          {gate.windows.length ? (
+            gate.windows.map((w) => (
+              <li key={w.ticker} className={cls(w.violation && "down", w.last_60s && !w.violation && "warn")}>
+                <span>{w.series.replace("KX", "")}</span>
+                <span>{signedCountdown(w.seconds_to_close)}</span>
+                <span>{w.violation ? "RED" : w.new_risk_allowed ? "OK" : "HOLD"}</span>
+              </li>
+            ))
+          ) : (
+            <li className="muted">No live window</li>
+          )}
+        </ul>
+      </div>
+
+      <div className="panel">
+        <label>10 · SETTLE BUFFER / UNLOCK</label>
+        <div className="panel-note">
+          Free on <b>settlement_ts</b> · plan {band[0]}–{band[1]}s (now {settle.recycle_s}s) ·{" "}
+          <em>NOT expected_expiration +5m</em>
+        </div>
+        <ul className="gate-list">
+          {settle.buffers.length ? (
+            settle.buffers.map((b) => (
+              <li key={b.ticker} className={cls(b.unlocked ? "up" : "cyan")}>
+                <span>{b.series.replace("KX", "")}</span>
+                <span>
+                  {b.unlocked ? "FREE" : `T-${countdown(Math.max(0, b.seconds_to_unlock))}`}
+                </span>
+                <span>{b.settlement_ts ? "TS" : "WAIT TS"}</span>
+              </li>
+            ))
+          ) : (
+            <li className="muted">No capital in settle lock</li>
+          )}
+        </ul>
+      </div>
+
+      <div className={cls("panel kill-panel", kill.active && "tripped")}>
+        <label>11 · KILL SWITCH</label>
+        <div className="kill-row">
+          <div className={cls("kill-state", kill.active ? "tripped" : "armed")}>
+            {kill.state}
+          </div>
+          <button
+            type="button"
+            className="kill-btn"
+            onClick={onKill}
+            disabled={kill.active}
+          >
+            MANUAL KILL
+          </button>
+        </div>
+        <div className="panel-note">
+          {kill.active
+            ? `${(kill.code || "trip").toUpperCase()} · ${kill.reason || "latched"}`
+            : "armed · reasons: loss / open / one-sided / manual"}
+        </div>
+      </div>
+
+      <div className="panel extras">
+        <label>EXTRAS</label>
+        <div className="kv tight">
+          <div>
+            <span>DRAWDOWN</span>
+            <b className={extras.drawdown > 0 ? "down" : "neutral"}>{money(extras.drawdown)}</b>
+          </div>
+          <div>
+            <span>DAY HIGH</span>
+            <b>{money(extras.day_high)}</b>
+          </div>
+          <div>
+            <span>SETTLED DIR</span>
+            <b>{pct(extras.settled_directional_pct)}</b>
+          </div>
+          <div>
+            <span>MAKER-FIRST</span>
+            <b className={extras.maker_first_pct >= 0.8 ? "up" : "warn"}>{pct(extras.maker_first_pct)}</b>
+          </div>
+          <div>
+            <span>BTC MIX</span>
+            <b>{money(extras.mix.BTC)}</b>
+          </div>
+          <div>
+            <span>ETH MIX</span>
+            <b>{money(extras.mix.ETH)}</b>
+          </div>
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+function Desk({
+  snap,
+  live,
+  clock,
+  onKill,
+}: {
+  snap: HudSnapshot;
+  live: boolean;
+  clock: Date;
+  onKill: () => void;
+}) {
   const { risk, pnl, mode, kill } = snap;
   const liveWins = snap.windows.filter((w) => w.live);
   const utc = clock.toISOString().slice(11, 23);
@@ -166,59 +438,43 @@ function Desk({ snap, live, clock }: { snap: HudSnapshot; live: boolean; clock: 
             <strong>{utc}</strong>
           </div>
           <div className="badges">
+            <span className={cls("badge", "mode", mode.hard_stop ? "hard" : "paper")}>{mode.badge}</span>
             <span className={cls("badge", live && "on")}>{live ? "LIVE FEED" : "SEEKING"}</span>
-            <span className="badge">{mode.paper_tape ? "PAPER TAPE" : "ORDERS"}</span>
-            <span className="badge">{mode.dry_run ? "DRY-RUN" : "SUBMIT"}</span>
             <span className="badge">{mode.mock ? "MOCK" : "PROD DATA"}</span>
             <span className={cls("badge", kill.active ? "kill" : "ok")}>
-              {kill.active ? "KILL ON" : "RISK OK"}
+              {kill.active ? `KILL ${kill.code || "ON"}` : "ARMED"}
             </span>
           </div>
         </div>
       </header>
 
-      {kill.active ? <div className="killbar">KILL SWITCH · {kill.reason || "ARMED"}</div> : null}
+      {mode.hard_stop ? (
+        <div className="hardstop">HARD STOP · LIVE WITHOUT APPROVAL · PAPER ONLY</div>
+      ) : null}
+      {kill.active ? (
+        <div className="killbar">
+          KILL SWITCH TRIPPED · {(kill.code || "latch").toUpperCase()} · {kill.reason || "ARMED"}
+        </div>
+      ) : null}
+
+      <section className="util-strip" aria-label="Limit utilization">
+        <span className="util-kicker">12 · LIMITS</span>
+        <UtilChip cell={snap.util.fill} />
+        <UtilChip cell={snap.util.open} />
+        <UtilChip cell={snap.util.windows} />
+        <UtilChip cell={snap.util.onesided} />
+        <UtilChip cell={snap.util.daily_loss} />
+      </section>
 
       <section className="grid">
-        <aside className="col risk">
-          <h2>RISK DESK v1</h2>
-          <div className="bank">
-            <label>BANKROLL</label>
-            <strong>{money(risk.bankroll, 0)}</strong>
-          </div>
-          <Meter label="OPEN NOTIONAL" value={risk.open_notional} max={risk.max_open} />
-          <Meter label="ONE-SIDED" value={risk.unpaired} max={risk.max_onesided} />
-          <Meter
-            label="DAILY LOSS (incl. unsettled)"
-            value={Math.max(0, -risk.daily_pnl)}
-            max={risk.daily_kill}
-            warn={pnl.daily_loss_util >= 0.7}
-          />
-          <Meter label="WINDOWS" value={risk.windows} max={risk.max_windows} format="count" />
-          <div className="kv">
-            <div>
-              <span>CLIP</span>
-              <b>{money(risk.clip, 0)}</b>
-            </div>
-            <div>
-              <span>LAST-60s</span>
-              <b>{risk.last_seconds}s</b>
-            </div>
-            <div>
-              <span>DAILY PNL</span>
-              <b className={pnlClass(pnl.daily)}>{money(pnl.daily)}</b>
-            </div>
-            <div>
-              <span>FEES</span>
-              <b>{money(pnl.fees, 4)}</b>
-            </div>
-          </div>
-        </aside>
+        <RiskDesk snap={snap} onKill={onKill} />
 
         <main className="col books">
           <h2>TOP OF BOOK · ACTIVE 15M+</h2>
           <div className="wins">
-            {liveWins.length ? liveWins.map((w) => <WindowPanel key={w.ticker} win={w} />) : (
+            {liveWins.length ? (
+              liveWins.map((w) => <WindowPanel key={w.ticker} win={w} />)
+            ) : (
               <p className="empty">No live 15m windows. Waiting on events-first rollover.</p>
             )}
           </div>
@@ -233,8 +489,8 @@ function Desk({ snap, live, clock }: { snap: HudSnapshot; live: boolean; clock: 
             ))}
           </div>
           <p className="desk-note">
-            Sampler · 15m+ crypto Up/Down only · paper matcher joins back of book ·
-            no POST /portfolio/events/orders unless --demo-submit
+            Sampler · 15m+ crypto Up/Down only · paper matcher joins back of book · no POST
+            /portfolio/events/orders unless --demo-submit · no max-daily-notional gauge
           </p>
         </main>
 
@@ -357,7 +613,7 @@ function Desk({ snap, live, clock }: { snap: HudSnapshot; live: boolean; clock: 
 }
 
 export function App() {
-  const { snap, live, clock } = useHud();
+  const { snap, live, clock, tripKill } = useHud();
   if (!snap) {
     return (
       <div className="boot">
@@ -371,5 +627,16 @@ export function App() {
       </div>
     );
   }
-  return <Desk snap={snap} live={live} clock={clock} />;
+  return (
+    <Desk
+      snap={snap}
+      live={live}
+      clock={clock}
+      onKill={() => {
+        if (window.confirm("Trip the paper kill switch? Entries block until restart.")) {
+          void tripKill();
+        }
+      }}
+    />
+  );
 }

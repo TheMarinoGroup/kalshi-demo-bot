@@ -241,9 +241,24 @@ kalshi-pbot hud --mock          # API/WS on :8080
 cd hud && npm install && npm run dev   # Vite on :5173, proxies to :8080
 ```
 
-The desk shows Risk Desk v1 utilization, YES/NO bids and implied asks,
-incomplete-pair inventory, resting paper (maker/taker tags), fill tape,
-session PnL / fee drag, and a carousel of current + next 15m+ windows.
+The desk is wired to live bot/paper state. Risk Desk MUST-SHOW panels:
+
+1. Mode badge — **PAPER** only (LIVE without approval = hard-stop visual)
+2. Bankroll — config-driven (`KALSHI_BANKROLL`, default $1,000)
+3. Clip / last fill — $10–$30 band (default $20)
+4. Open notional util — $ / $50 + % bar (≥80% amber; ≥$50 red/kill)
+5. Windows in flight — n / 2
+6. One-sided / incomplete pair — $ / $30 + leg/ticker (abort unpaired)
+7. Daily PnL + kill — day PnL vs −$20, **including unsettled until `settlement_ts`**
+8. Fee drag — fees today + maker/taker split (maker $0 pending confirm)
+9. Last-60s gate — time-to-close per window + `new_risk_allowed` (violation = red)
+10. Settle buffer / unlock — free on `settlement_ts`; plan 60–90s (**not** `expected_expiration` +5m)
+11. Kill switch — ARMED / TRIPPED + reason (loss / open / one-sided / manual) + manual kill
+12. Compact limit strip — fill · open · windows · one-sided · daily loss
+
+Colors: green inside limits / amber ~80% / red breach or kill. There is
+**no** max-daily-notional gauge. Also shown when space allows: drawdown
+from day high, settled-directional %, maker-first compliance, BTC/ETH mix.
 
 ## Tests
 

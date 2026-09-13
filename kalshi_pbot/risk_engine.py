@@ -57,6 +57,22 @@ def recycle_ready(
     return seconds_since_close(close_time, now) >= recycle_seconds
 
 
+def classify_kill(reason: str) -> str:
+    """Map a kill-switch detail string to HUD codes: loss / open / one-sided / manual."""
+    text = (reason or "").strip().lower()
+    if not text:
+        return ""
+    if "manual" in text:
+        return "manual"
+    if "daily_loss" in text or text.startswith("loss"):
+        return "loss"
+    if "onesided" in text or "one-sided" in text or "one_sided" in text:
+        return "one-sided"
+    if "open_notional" in text or text.startswith("open"):
+        return "open"
+    return text.split()[0]
+
+
 @dataclass
 class RiskEngine:
     settings: Settings
@@ -82,6 +98,21 @@ class RiskEngine:
             return True
         return False
 
+    def maybe_trip_limits(self, snapshot: PortfolioSnapshot) -> bool:
+        """Latch kill on daily loss, open-notional breach, or one-sided breach."""
+        tripped = self.maybe_trip_daily(snapshot)
+        if snapshot.open_notional > self.settings.max_open_notional:
+            self.trip(
+                f"open_notional {snapshot.open_notional} > {self.settings.max_open_notional}"
+            )
+            return True
+        if snapshot.unpaired_notional > self.settings.max_onesided:
+            self.trip(
+                f"onesided {snapshot.unpaired_notional} > {self.settings.max_onesided}"
+            )
+            return True
+        return tripped or self.kill_active
+
     def evaluate(
         self,
         intent: QuoteIntent,
@@ -90,7 +121,7 @@ class RiskEngine:
         close_time: datetime,
         now: datetime | None = None,
     ) -> RiskDecision:
-        self.maybe_trip_daily(snapshot)
+        self.maybe_trip_limits(snapshot)
         if snapshot.kill_active or self.kill_active:
             if intent.kind in {IntentKind.FLATTEN, IntentKind.CANCEL}:
                 return RiskDecision(True, RejectReason.OK, "flatten_during_kill")
@@ -165,6 +196,12 @@ class RiskEngine:
         return RiskDecision(True, RejectReason.OK)
 
     def _projected_onesided(self, intent: QuoteIntent, snapshot: PortfolioSnapshot) -> Decimal:
+        """Portfolio-wide unpaired notional after this intent (all windows)."""
+        others = Decimal("0")
+        for ticker, pos in snapshot.positions.items():
+            if ticker != intent.market_ticker:
+                others += pos.unpaired_notional()
+
         pos = snapshot.positions.get(intent.market_ticker)
         yes_qty = pos.yes_qty if pos else Decimal("0")
         no_qty = pos.no_qty if pos else Decimal("0")
@@ -183,4 +220,4 @@ class RiskEngine:
         extra_no = no_qty - paired
         yes_px = (yes_cost / yes_qty) if yes_qty else Decimal("0")
         no_px = (no_cost / no_qty) if no_qty else Decimal("0")
-        return extra_yes * yes_px + extra_no * no_px
+        return others + extra_yes * yes_px + extra_no * no_px

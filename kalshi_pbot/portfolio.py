@@ -32,6 +32,17 @@ class Portfolio:
         self.day = date.today()
         self.kill_active = False
         self.kill_reason = ""
+        self.day_high_pnl = Decimal("0")
+        self.locked_pair_realized = Decimal("0")
+        self.directional_settled = Decimal("0")
+        self.paired_qty_realized = Decimal("0")
+        self.directional_qty_settled = Decimal("0")
+        self.maker_fees = Decimal("0")
+        self.taker_fees = Decimal("0")
+        self.maker_fill_count = 0
+        self.taker_fill_count = 0
+        self.maker_fill_notional = Decimal("0")
+        self.taker_fill_notional = Decimal("0")
 
     def reset_day_if_needed(self, now: datetime | None = None) -> None:
         today = (now or datetime.now(UTC)).date()
@@ -39,6 +50,17 @@ class Portfolio:
             self.day = today
             self.realized_pnl = Decimal("0")
             self.fees = Decimal("0")
+            self.day_high_pnl = Decimal("0")
+            self.locked_pair_realized = Decimal("0")
+            self.directional_settled = Decimal("0")
+            self.paired_qty_realized = Decimal("0")
+            self.directional_qty_settled = Decimal("0")
+            self.maker_fees = Decimal("0")
+            self.taker_fees = Decimal("0")
+            self.maker_fill_count = 0
+            self.taker_fill_count = 0
+            self.maker_fill_notional = Decimal("0")
+            self.taker_fill_notional = Decimal("0")
             for pos in self.positions.values():
                 pos.realized_pnl = Decimal("0")
                 pos.fees = Decimal("0")
@@ -70,6 +92,14 @@ class Portfolio:
 
         pos.fees += fill.fee
         self.fees += fill.fee
+        if fill.is_taker:
+            self.taker_fees += fill.fee
+            self.taker_fill_count += 1
+            self.taker_fill_notional += notional
+        else:
+            self.maker_fees += fill.fee
+            self.maker_fill_count += 1
+            self.maker_fill_notional += notional
 
         # Realize locked pair as soon as both legs exist.
         paired = pos.paired_qty
@@ -79,6 +109,8 @@ class Portfolio:
             locked = paired * (Decimal("1") - yes_px - no_px)
             pos.realized_pnl += locked
             self.realized_pnl += locked
+            self.locked_pair_realized += locked
+            self.paired_qty_realized += paired
             pos.yes_qty -= paired
             pos.no_qty -= paired
             pos.yes_cost -= yes_px * paired
@@ -138,13 +170,17 @@ class Portfolio:
             self.drop_resting(order.order_id)
         pos = self.positions.get(ticker)
         pnl = Decimal("0")
+        leftover_qty = Decimal("0")
         if pos is not None:
+            leftover_qty = pos.yes_qty + pos.no_qty
             if result is Outcome.YES:
                 pnl = pos.yes_qty * payout - pos.yes_cost - pos.no_cost
             else:
                 pnl = pos.no_qty * payout - pos.yes_cost - pos.no_cost
             pos.realized_pnl += pnl
             self.realized_pnl += pnl
+            self.directional_settled += pnl
+            self.directional_qty_settled += leftover_qty
             pos.yes_qty = pos.no_qty = Decimal("0")
             pos.yes_cost = pos.no_cost = Decimal("0")
         recycle_s = None
@@ -185,6 +221,8 @@ class Portfolio:
             windows.add(order.event_ticker)
 
         daily = self.realized_pnl - self.fees + unrealized
+        if daily > self.day_high_pnl:
+            self.day_high_pnl = daily
         return PortfolioSnapshot(
             bankroll=self.settings.bankroll,
             realized_pnl=self.realized_pnl,

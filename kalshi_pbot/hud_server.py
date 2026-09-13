@@ -11,12 +11,17 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from kalshi_pbot.hud_state import MidHistory, build_snapshot
 
 log = structlog.get_logger(__name__)
 
 HUD_DIST = Path(__file__).resolve().parent / "hud_static"
+
+
+class KillRequest(BaseModel):
+    reason: str = Field(default="manual", max_length=120)
 
 
 class HudHub:
@@ -47,6 +52,20 @@ def create_app(bot: Any, hub: HudHub, history: MidHistory) -> FastAPI:
         if not hub.latest:
             hub.publish(build_snapshot(bot, history))
         return hub.latest
+
+    @app.post("/api/kill")
+    def trip_kill(body: KillRequest | None = None) -> dict[str, Any]:
+        raw = (body.reason if body else "manual") or "manual"
+        detail = raw if raw.lower().startswith("manual") else f"manual {raw}"
+        bot.risk.trip(detail)
+        bot.portfolio.kill_active = True
+        bot.portfolio.kill_reason = bot.risk.kill_reason
+        if hasattr(bot, "execution"):
+            bot.execution.cancel_all()
+        snap = build_snapshot(bot, history)
+        hub.publish(snap)
+        log.warning("hud_manual_kill", reason=bot.risk.kill_reason)
+        return {"ok": True, "kill": snap["kill"]}
 
     @app.websocket("/ws")
     async def stream(ws: WebSocket) -> None:

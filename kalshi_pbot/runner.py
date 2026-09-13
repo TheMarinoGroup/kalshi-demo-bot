@@ -256,7 +256,7 @@ class PaperBot:
             if b
         }
         snapshot = self.portfolio.snapshot(books)
-        self.risk.maybe_trip_daily(snapshot)
+        self.risk.maybe_trip_limits(snapshot)
         if self.risk.kill_active:
             self.portfolio.kill_active = True
             self.portfolio.kill_reason = self.risk.kill_reason

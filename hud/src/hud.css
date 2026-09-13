@@ -172,7 +172,22 @@ body {
   border-color: var(--kill);
 }
 
-.killbar {
+.badge.mode.paper {
+  color: var(--ok);
+  border-color: #1d4d38;
+  background: #0c1f18;
+}
+
+.badge.mode.hard,
+.badge.hard {
+  color: #fff;
+  background: var(--kill);
+  border-color: var(--kill);
+  animation: pulse 0.8s ease-in-out infinite;
+}
+
+.killbar,
+.hardstop {
   background: var(--kill);
   color: #fff;
   font-family: var(--mono);
@@ -182,13 +197,91 @@ body {
   text-align: center;
 }
 
+.hardstop {
+  background: #7a0020;
+  letter-spacing: 0.2em;
+  font-weight: 700;
+}
+
+.util-strip {
+  display: grid;
+  grid-template-columns: auto repeat(5, 1fr);
+  gap: 8px;
+  align-items: stretch;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+  background: #0a0e14;
+}
+
+.util-kicker {
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  color: var(--amber);
+  display: flex;
+  align-items: center;
+  font-weight: 600;
+}
+
+.util-chip {
+  border: 1px solid var(--line);
+  padding: 5px 8px 6px;
+  background: var(--panel);
+}
+
+.util-chip span {
+  display: block;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+}
+
+.util-chip b {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.util-track {
+  height: 4px;
+  margin-top: 4px;
+  background: #161d28;
+}
+
+.util-track > div {
+  height: 100%;
+}
+
+.util-chip.green b,
+.tone.green {
+  color: var(--ok);
+}
+.util-chip.amber b,
+.tone.amber {
+  color: var(--amber-2);
+}
+.util-chip.red b,
+.tone.red {
+  color: var(--down);
+}
+.util-chip.green .util-track > div,
+.meter-fill.green {
+  background: linear-gradient(90deg, #1f8a5b, var(--up));
+}
+.util-chip.amber .util-track > div,
+.meter-fill.amber {
+  background: linear-gradient(90deg, #8a6a1f, var(--amber));
+}
+.util-chip.red .util-track > div,
+.meter-fill.red {
+  background: linear-gradient(90deg, #8a1f35, var(--down));
+}
+
 .grid {
   display: grid;
-  grid-template-columns: 280px 1fr 320px;
+  grid-template-columns: 360px 1fr 300px;
   gap: 12px;
   padding: 12px 16px;
   flex: 1;
-  min-height: calc(100vh - 200px);
+  min-height: calc(100vh - 240px);
 }
 
 .col {
@@ -264,6 +357,145 @@ h2,
 
 .meter-fill.hot {
   background: linear-gradient(90deg, #8a1f35, var(--down));
+}
+
+.meter-note,
+.panel-note {
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 4px;
+  letter-spacing: 0.03em;
+}
+
+.panel-note em {
+  font-style: normal;
+  color: var(--amber);
+}
+
+.panel {
+  border: 1px solid var(--line);
+  background: #0a0f16;
+  padding: 8px;
+  margin-bottom: 10px;
+}
+
+.panel > label {
+  display: block;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  color: var(--amber);
+  margin-bottom: 6px;
+}
+
+.panel.breach {
+  border-color: var(--down);
+  box-shadow: inset 0 0 16px rgba(255, 92, 122, 0.12);
+}
+
+.mode-badge {
+  font-family: var(--mono);
+  font-size: 22px;
+  letter-spacing: 0.18em;
+  font-weight: 700;
+}
+
+.mode-badge.paper {
+  color: var(--ok);
+}
+
+.mode-badge.live,
+.mode-badge.hard {
+  color: var(--kill);
+}
+
+.kv.tight {
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 0;
+}
+
+.last-fill {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin-top: 6px;
+  font-size: 11px;
+}
+
+.last-fill b {
+  font-family: var(--mono);
+  font-size: 16px;
+}
+
+.gate-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.gate-list li {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 8px;
+  padding: 2px 0;
+  border-bottom: 1px solid #151c26;
+}
+
+.kill-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.kill-state {
+  font-family: var(--mono);
+  font-size: 18px;
+  letter-spacing: 0.12em;
+  font-weight: 700;
+}
+
+.kill-state.armed {
+  color: var(--ok);
+}
+
+.kill-state.tripped {
+  color: var(--kill);
+}
+
+.kill-panel.tripped {
+  border-color: var(--kill);
+}
+
+.kill-btn {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  background: #3a0c16;
+  color: #ff8aa0;
+  border: 1px solid var(--kill);
+  padding: 5px 8px;
+  cursor: pointer;
+}
+
+.kill-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.pill.ok {
+  color: var(--ok);
+}
+
+.pill.breach,
+.clock.breach strong {
+  color: var(--down);
+}
+
+.win.breach {
+  border-color: var(--down);
 }
 
 .kv {
@@ -555,7 +787,8 @@ td {
 @media (max-width: 1100px) {
   .grid,
   .bottom,
-  .mast {
+  .mast,
+  .util-strip {
     display: flex;
     flex-direction: column;
   }

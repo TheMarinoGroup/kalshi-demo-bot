@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { HudSnapshot } from "./types";
 
 function wsUrl(): string {
@@ -6,7 +6,12 @@ function wsUrl(): string {
   return `${proto}://${window.location.host}/ws`;
 }
 
-export function useHud(): { snap: HudSnapshot | null; live: boolean; clock: Date } {
+export function useHud(): {
+  snap: HudSnapshot | null;
+  live: boolean;
+  clock: Date;
+  tripKill: () => Promise<void>;
+} {
   const [snap, setSnap] = useState<HudSnapshot | null>(null);
   const [live, setLive] = useState(false);
   const [clock, setClock] = useState(() => new Date());
@@ -58,5 +63,24 @@ export function useHud(): { snap: HudSnapshot | null; live: boolean; clock: Date
     };
   }, []);
 
-  return { snap, live, clock };
+  const tripKill = useCallback(async () => {
+    const res = await fetch("/api/kill", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "manual" }),
+    });
+    if (res.ok) {
+      const body = (await res.json()) as { kill?: HudSnapshot["kill"] };
+      setSnap((prev) =>
+        prev && body.kill
+          ? {
+              ...prev,
+              kill: body.kill,
+            }
+          : prev,
+      );
+    }
+  }, []);
+
+  return { snap, live, clock, tripKill };
 }
