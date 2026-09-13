@@ -1,0 +1,32 @@
+services:
+  desk:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      KALSHI_DRY_RUN: "${KALSHI_DRY_RUN:-true}"
+      KALSHI_PAPER_TAPE: "${KALSHI_PAPER_TAPE:-true}"
+      KALSHI_LOG_JSON: "true"
+      KALSHI_HUD: "true"
+    command: ["kalshi-pbot", "hud"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./secrets:/secrets:ro
+      - ./data:/app/data
+
+  pbot:
+    build: .
+    profiles: ["headless"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      KALSHI_DRY_RUN: "${KALSHI_DRY_RUN:-true}"
+      KALSHI_LOG_JSON: "true"
+    command: ["kalshi-pbot", "run", "--dry-run"]
+    volumes:
+      - ./secrets:/secrets:ro
+      - ./data:/app/data
