@@ -1,0 +1,16 @@
+services:
+  pbot:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      KALSHI_DRY_RUN: "${KALSHI_DRY_RUN:-true}"
+      KALSHI_LOG_JSON: "true"
+    # Default is dry-run. Override command for demo-submit:
+    #   command: ["kalshi-pbot", "run", "--demo-submit"]
+    command: ["kalshi-pbot", "run", "--dry-run"]
+    volumes:
+      # Mount the demo private key read-only; never bake secrets into the image.
+      - ./secrets:/secrets:ro
+    extra_hosts: []
