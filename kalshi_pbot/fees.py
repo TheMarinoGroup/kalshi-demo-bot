@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from decimal import ROUND_CEILING, Decimal
 
+from dataclasses import dataclass
+
 from kalshi_pbot.types import D
 
 CENTICENT = Decimal("0.0001")
@@ -137,6 +139,31 @@ def taker_pair_viable(
         )
         >= D(min_edge) * D(count)
     )
+
+
+@dataclass(frozen=True)
+class FeeDrag:
+    charged: Decimal
+    assumed_maker: Decimal
+    pending_demo_confirm: bool
+    fee_type: str
+
+
+def fee_drag(
+    price: Decimal,
+    count: Decimal,
+    *,
+    is_taker: bool,
+    fee_type: str = "quadratic",
+    multiplier: Decimal = ONE,
+) -> FeeDrag:
+    """Loggable fee for a fill. Maker $0 on quadratic is pending demo confirmation."""
+    if is_taker:
+        charged = taker_fee(price, count, multiplier=multiplier)
+        return FeeDrag(charged, Decimal("0"), False, fee_type)
+    assumed = maker_fee(price, count, fee_type=fee_type, multiplier=multiplier)
+    pending = fee_type == "quadratic"
+    return FeeDrag(assumed, assumed, pending, fee_type)
 
 
 def maker_pair_viable(

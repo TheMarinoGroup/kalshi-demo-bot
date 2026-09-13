@@ -1,19 +1,24 @@
-"""Order placement / cancel with dry-run default and V2 events API."""
+"""Order placement / cancel. Paper-tape default; POST only via --demo-submit."""
 
 from __future__ import annotations
 
+import time
 import uuid
+from dataclasses import replace
 from decimal import Decimal
 
 import structlog
 
 from kalshi_pbot.config import Settings
 from kalshi_pbot.kalshi_client import KalshiRestClient
+from kalshi_pbot.paper_matcher import PaperMatcher
 from kalshi_pbot.portfolio import Portfolio
+from kalshi_pbot.tape import JsonlTape
 from kalshi_pbot.types import (
     CancelIntent,
     IntentKind,
     Liquidity,
+    OrderBook,
     Outcome,
     QuoteIntent,
     RestingOrder,
@@ -53,34 +58,72 @@ class ExecutionEngine:
         settings: Settings,
         portfolio: Portfolio,
         rest: KalshiRestClient | None = None,
+        *,
+        matcher: PaperMatcher | None = None,
+        tape: JsonlTape | None = None,
     ) -> None:
         self.settings = settings
         self.portfolio = portfolio
         self.rest = rest
+        self.matcher = matcher or PaperMatcher(
+            latency_ms=settings.latency_ms,
+        )
+        self.tape = tape
         self.dry_run_orders: list[dict[str, object]] = []
 
     @property
     def live_submit(self) -> bool:
-        return (not self.settings.dry_run) and self.rest is not None
+        return self.settings.live_submit and self.rest is not None
 
-    def submit(self, intent: QuoteIntent) -> dict[str, object]:
+    def submit(self, intent: QuoteIntent, book: OrderBook | None = None) -> dict[str, object]:
         body = build_order_body(intent)
         self.portfolio.orders_submitted += 1
-        if not self.live_submit:
-            fake_id = f"dry-{body['client_order_id']}"
-            self.dry_run_orders.append(body)
-            self.portfolio.upsert_resting(
-                RestingOrder(
-                    order_id=fake_id,
-                    client_order_id=str(body["client_order_id"]),
-                    market_ticker=intent.market_ticker,
-                    event_ticker=intent.event_ticker,
-                    outcome=intent.outcome,
+
+        if self.live_submit:
+            return self._post_order(intent, body)
+
+        oid = str(body["client_order_id"])
+        paper_id = f"paper-{oid}" if self.settings.paper_tape else f"dry-{oid}"
+        self.dry_run_orders.append(body)
+        self.portfolio.upsert_resting(
+            RestingOrder(
+                order_id=paper_id,
+                client_order_id=oid,
+                market_ticker=intent.market_ticker,
+                event_ticker=intent.event_ticker,
+                outcome=intent.outcome,
+                price=intent.price,
+                remaining=intent.count,
+                post_only=bool(body["post_only"]),
+            )
+        )
+        if self.settings.paper_tape and intent.liquidity is Liquidity.MAKER:
+            placed = replace(intent, client_order_id=paper_id)
+            now_ms = int(time.time() * 1000)
+            local_book = book or OrderBook(ticker=intent.market_ticker)
+            self.matcher.place(placed, local_book, now_ms)
+            if self.tape:
+                self.tape.write(
+                    "quote",
+                    order_id=paper_id,
+                    ticker=intent.market_ticker,
+                    outcome=intent.outcome.value,
                     price=intent.price,
-                    remaining=intent.count,
+                    count=intent.count,
+                    notional=intent.notional,
+                    latency_ms=self.settings.latency_ms,
                     post_only=bool(body["post_only"]),
                 )
+            log.info(
+                "paper_quote",
+                ticker=intent.market_ticker,
+                outcome=intent.outcome.value,
+                price=str(intent.price),
+                count=str(intent.count),
+                latency_ms=self.settings.latency_ms,
+                post_only=body["post_only"],
             )
+        else:
             log.info(
                 "dry_run_order",
                 **{k: str(v) for k, v in body.items()},
@@ -88,16 +131,24 @@ class ExecutionEngine:
                 kind=intent.kind.value,
                 reason=intent.reason,
                 notional=str(intent.notional),
+                paper_tape=self.settings.paper_tape,
             )
-            return {
-                "order_id": fake_id,
-                "client_order_id": body["client_order_id"],
-                "dry_run": True,
-            }
+            if self.tape:
+                self.tape.write(
+                    "flatten" if intent.kind is IntentKind.FLATTEN else "dry_run",
+                    ticker=intent.market_ticker,
+                    outcome=intent.outcome.value,
+                    price=intent.price,
+                    count=intent.count,
+                    kind=intent.kind.value,
+                    reason=intent.reason,
+                )
+        return {"order_id": paper_id, "client_order_id": oid, "dry_run": True, "paper_tape": True}
 
+    def _post_order(self, intent: QuoteIntent, body: dict[str, object]) -> dict[str, object]:
         assert self.rest is not None
         response = self.rest.create_order(body)
-        payload = {}
+        payload: dict[str, object] = {}
         try:
             payload = response.json()
         except Exception:
@@ -142,6 +193,7 @@ class ExecutionEngine:
             return self.cancel_all()
         if not intent.order_id:
             return {"ok": False, "error": "missing order_id"}
+        self.matcher.cancel(intent.order_id, reason=intent.reason)
         if not self.live_submit:
             dropped = self.portfolio.drop_resting(intent.order_id)
             log.info(
@@ -151,6 +203,13 @@ class ExecutionEngine:
                 reason=intent.reason,
                 found=dropped is not None,
             )
+            if self.tape:
+                self.tape.write(
+                    "cancel",
+                    order_id=intent.order_id,
+                    ticker=intent.market_ticker,
+                    reason=intent.reason,
+                )
             return {"order_id": intent.order_id, "dry_run": True, "reduced_by": "all"}
 
         assert self.rest is not None
@@ -165,10 +224,14 @@ class ExecutionEngine:
 
     def cancel_all(self) -> dict[str, object]:
         ids = list(self.portfolio.resting)
+        for oid in list(self.matcher.orders):
+            self.matcher.cancel(oid, reason="cancel_all")
         if not self.live_submit:
             for oid in ids:
                 self.portfolio.drop_resting(oid)
             log.info("dry_run_cancel_all", count=len(ids))
+            if self.tape:
+                self.tape.write("cancel_all", cancelled=len(ids))
             return {"dry_run": True, "cancelled": len(ids)}
         assert self.rest is not None
         response = self.rest.cancel_all_orders()
@@ -179,6 +242,7 @@ class ExecutionEngine:
         return {"status": response.status_code, "cancelled": len(ids)}
 
     def cancel_market(self, ticker: str, event_ticker: str, reason: str) -> None:
+        self.matcher.cancel_ticker(ticker, reason=reason)
         for order in list(self.portfolio.resting_for(ticker)):
             self.cancel(
                 CancelIntent(

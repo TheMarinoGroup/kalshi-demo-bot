@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from kalshi_pbot.fees import maker_fee, maker_pair_viable, pair_edge
+from kalshi_pbot.fees import fee_drag, maker_fee, maker_pair_viable, pair_edge
 
 
 def test_maker_fee_zero_on_quadratic_series() -> None:
@@ -38,3 +38,16 @@ def test_taker_pair_edge_negative_near_mid() -> None:
     assert edge < 0
     # 1 - 1.00 - 0.035 = -0.035
     assert edge == Decimal("-0.035000")
+
+
+def test_fee_drag_maker_quadratic_pending_confirm() -> None:
+    drag = fee_drag(Decimal("0.50"), Decimal("10"), is_taker=False, fee_type="quadratic")
+    assert drag.charged == Decimal("0")
+    assert drag.assumed_maker == Decimal("0")
+    assert drag.pending_demo_confirm is True
+
+
+def test_fee_drag_taker_not_pending() -> None:
+    drag = fee_drag(Decimal("0.50"), Decimal("1"), is_taker=True)
+    assert drag.charged == Decimal("0.017500")
+    assert drag.pending_demo_confirm is False

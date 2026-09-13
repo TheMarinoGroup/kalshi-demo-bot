@@ -13,4 +13,5 @@ services:
     volumes:
       # Mount the demo private key read-only; never bake secrets into the image.
       - ./secrets:/secrets:ro
+      - ./data:/app/data
     extra_hosts: []

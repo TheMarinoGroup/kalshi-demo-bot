@@ -47,6 +47,8 @@ def compute_metrics(
         windows_used=len(snapshot.window_ids),
         kill_active=snapshot.kill_active or False,
         dry_run=settings.dry_run,
+        paper_tape=settings.paper_tape,
+        latency_ms=settings.latency_ms,
     )
 
 
@@ -68,4 +70,6 @@ def emit_metrics(metrics: BotMetrics) -> None:
         windows_used=metrics.windows_used,
         kill_active=metrics.kill_active,
         dry_run=metrics.dry_run,
+        paper_tape=metrics.paper_tape,
+        latency_ms=metrics.latency_ms,
     )

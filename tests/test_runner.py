@@ -21,7 +21,10 @@ def test_mock_bot_discovers_and_dry_runs_quotes() -> None:
     assert submitted
     assert all(q.post_only or q.liquidity is Liquidity.TAKER for q in submitted)
     assert bot.execution.dry_run_orders
+    assert bot.matcher.orders
     assert bot.portfolio.orders_submitted == len(submitted)
+    assert bot.settings.paper_tape is True
+    assert bot.settings.live_submit is False
     # Risk Desk utilization is logged via metrics; open notional stays under $50
     snap = bot.portfolio.snapshot({ticker: book})
     assert snap.open_notional <= settings.max_open_notional

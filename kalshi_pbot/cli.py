@@ -7,7 +7,7 @@ from typing import Annotated
 import structlog
 import typer
 
-from kalshi_pbot.config import Settings, load_settings
+from kalshi_pbot.config import LATENCY_BUCKETS, Settings, load_settings
 from kalshi_pbot.logging_setup import configure_logging
 
 app = typer.Typer(
@@ -25,20 +25,29 @@ def _settings(
     mock: bool = False,
     series: str | None = None,
     bankroll: float | None = None,
+    latency: int | None = None,
+    tape: str | None = None,
 ) -> Settings:
     overrides: dict[str, object] = {}
     if mock:
         overrides["mock"] = True
         overrides["dry_run"] = True
+        overrides["paper_tape"] = True
     if demo_submit:
         overrides["dry_run"] = False
+        overrides["paper_tape"] = False
         overrides["mock"] = False
     elif dry_run is True:
         overrides["dry_run"] = True
+        overrides["paper_tape"] = True
     if series:
         overrides["series"] = series
     if bankroll is not None:
         overrides["bankroll"] = bankroll
+    if latency is not None:
+        overrides["latency_ms"] = latency
+    if tape:
+        overrides["tape_path"] = tape
     settings = load_settings(**overrides)
     if demo_submit and not settings.has_credentials():
         raise typer.BadParameter(
@@ -74,18 +83,33 @@ def run(
         float | None,
         typer.Option("--bankroll", help="Paper bankroll; risk limits rescale."),
     ] = None,
+    latency: Annotated[
+        int,
+        typer.Option(
+            "--latency",
+            help="Paper-matcher latency bucket in ms (50, 150, or 500).",
+        ),
+    ] = 150,
+    tape: Annotated[
+        str | None,
+        typer.Option("--tape", help="JSONL paper-tape path."),
+    ] = None,
 ) -> None:
-    """Discover windows, evaluate maker/pair quotes, and dry-run or demo-submit."""
+    """Discover windows, evaluate maker/pair quotes, and paper-tape or demo-submit."""
+    if latency not in LATENCY_BUCKETS:
+        raise typer.BadParameter(f"--latency must be one of {LATENCY_BUCKETS}")
     settings = _settings(
         dry_run=dry_run,
         demo_submit=demo_submit,
         mock=mock,
         series=series,
         bankroll=bankroll,
+        latency=latency,
+        tape=tape,
     )
     configure_logging(settings.log_level, settings.log_json)
     if demo_submit:
-        log.warning("demo_submit_enabled", rest=settings.resolved_rest_base)
+        log.warning("demo_submit_enabled", order_rest=settings.resolved_order_rest)
     from kalshi_pbot.runner import run_bot
 
     run_bot(settings)
@@ -96,7 +120,7 @@ def discover(
     mock: Annotated[bool, typer.Option("--mock")] = False,
     series: Annotated[str | None, typer.Option("--series")] = None,
 ) -> None:
-    """List currently open 15-minute windows for configured series."""
+    """List open + unopened 15-minute windows via GET /events (prod public REST)."""
     settings = _settings(mock=mock, series=series)
     configure_logging(settings.log_level, settings.log_json)
     from kalshi_pbot.runner import discover_once
@@ -119,9 +143,13 @@ def status() -> None:
     settings = load_settings()
     configure_logging(settings.log_level, settings.log_json)
     typer.echo(f"env              {settings.env}")
-    typer.echo(f"rest             {settings.resolved_rest_base}")
+    typer.echo(f"data_rest        {settings.resolved_data_rest}")
+    typer.echo(f"order_rest       {settings.resolved_order_rest}")
     typer.echo(f"ws               {settings.resolved_ws_url}")
     typer.echo(f"dry_run          {settings.dry_run}")
+    typer.echo(f"paper_tape       {settings.paper_tape}")
+    typer.echo(f"latency_ms       {settings.latency_ms}")
+    typer.echo(f"live_submit      {settings.live_submit}")
     typer.echo(f"credentials      {settings.has_credentials()}")
     typer.echo(f"series           {','.join(settings.series_tickers)}")
     typer.echo(f"bankroll         ${settings.bankroll}")
@@ -134,6 +162,31 @@ def status() -> None:
     typer.echo(f"quote_mode       {settings.quote_mode}")
     typer.echo(f"min_edge         {settings.min_edge}")
     typer.echo(f"taker_pair_arb   {settings.taker_pair_arb}")
+    typer.echo(f"windows_path     {settings.windows_path}")
+    typer.echo(f"tape_path        {settings.tape_path}")
+
+
+@app.command()
+def replay(
+    tape: Annotated[
+        str,
+        typer.Argument(help="JSONL paper tape to aggregate."),
+    ] = "data/tape.jsonl",
+) -> None:
+    """Replay a paper tape into an expectancy summary (no orders)."""
+    settings = load_settings()
+    configure_logging(settings.log_level, settings.log_json)
+    from kalshi_pbot.expectancy import replay_tape
+
+    report = replay_tape(tape, settings)
+    typer.echo(f"records          {report.records}")
+    typer.echo(f"quotes           {report.quotes}")
+    typer.echo(f"paper_fills      {report.paper_fills}")
+    typer.echo(f"ambiguous_wipes  {report.ambiguous_wipes}")
+    typer.echo(f"fees             {report.fees}")
+    typer.echo(f"fill_notional    {report.fill_notional}")
+    typer.echo(f"by_latency       {report.by_latency}")
+    typer.echo(f"by_kind          {report.by_kind}")
 
 
 @app.command()
@@ -147,7 +200,7 @@ def flatten(
     from kalshi_pbot.kalshi_client import KalshiClient
     from kalshi_pbot.portfolio import Portfolio
 
-    if settings.dry_run:
+    if settings.dry_run or settings.paper_tape:
         log.info("flatten_dry_run", hint="pass --demo-submit to cancel demo orders")
         return
     client = KalshiClient(settings)

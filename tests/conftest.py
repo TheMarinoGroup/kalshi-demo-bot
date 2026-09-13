@@ -16,9 +16,15 @@ from kalshi_pbot.types import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _research_paths(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("KALSHI_WINDOWS_PATH", str(tmp_path / "windows.json"))
+    monkeypatch.setenv("KALSHI_TAPE_PATH", str(tmp_path / "tape.jsonl"))
+
+
 @pytest.fixture
 def settings() -> Settings:
-    return Settings(bankroll=Decimal("1000"), dry_run=True, mock=True)
+    return Settings(bankroll=Decimal("1000"), dry_run=True, mock=True, paper_tape=True)
 
 
 @pytest.fixture

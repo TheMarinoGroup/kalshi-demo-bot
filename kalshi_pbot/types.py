@@ -127,6 +127,25 @@ class OrderBook:
             return None
         return ask - bid
 
+    def size_at(self, outcome: Outcome, price: Decimal) -> Decimal:
+        levels = self.yes_bids if outcome is Outcome.YES else self.no_bids
+        for lvl in levels:
+            if lvl.price == price:
+                return lvl.size
+        return Decimal("0")
+
+    def tob(self) -> TopOfBook:
+        return TopOfBook(
+            ticker=self.ticker,
+            yes_bid=self.best_yes_bid(),
+            yes_ask=self.implied_yes_ask(),
+            no_bid=self.best_no_bid(),
+            no_ask=self.implied_no_ask(),
+            mid_yes=self.mid_yes(),
+            spread_yes=self.spread_yes(),
+            seq=self.seq,
+        )
+
 
 @dataclass(frozen=True)
 class QuoteIntent:
@@ -313,3 +332,52 @@ class BotMetrics:
     windows_used: int
     kill_active: bool
     dry_run: bool
+    paper_tape: bool = True
+    latency_ms: int = 150
+
+
+@dataclass(frozen=True)
+class TopOfBook:
+    ticker: str
+    yes_bid: Decimal | None
+    yes_ask: Decimal | None
+    no_bid: Decimal | None
+    no_ask: Decimal | None
+    mid_yes: Decimal | None
+    spread_yes: Decimal | None
+    seq: int = 0
+
+
+@dataclass(frozen=True)
+class PublicTrade:
+    trade_id: str
+    market_ticker: str
+    yes_price: Decimal
+    no_price: Decimal
+    count: Decimal
+    taker_outcome: Outcome
+    ts_ms: int
+    is_block: bool = False
+
+
+@dataclass(frozen=True)
+class PaperFill:
+    order_id: str
+    market_ticker: str
+    event_ticker: str
+    outcome: Outcome
+    price: Decimal
+    count: Decimal
+    fee: Decimal
+    ts_ms: int
+    latency_ms: int
+    reason: str
+
+
+@dataclass(frozen=True)
+class CFBTick:
+    index_id: str
+    value: Decimal
+    avg_60s: Decimal | None
+    settle_avg: Decimal | None
+    received_at_ms: int

@@ -84,12 +84,22 @@ def market_from_api(
 class MarketSource(Protocol):
     def get_series(self, series_ticker: str) -> SeriesMeta: ...
     def list_open_markets(self, series_ticker: str) -> list[MarketWindow]: ...
+    def list_events(self, series_ticker: str, status: str) -> list[MarketWindow]: ...
     def get_orderbook(self, ticker: str) -> JsonDict: ...
 
 
 class KalshiRestClient:
-    def __init__(self, settings: Settings, *, private_key: Any | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        base_url: str | None = None,
+        private_key: Any | None = None,
+        purpose: str = "data",
+    ) -> None:
         self.settings = settings
+        self.base_url = (base_url or settings.resolved_data_rest).rstrip("/")
+        self.purpose = purpose
         self._key = private_key
         self._http = httpx.Client(timeout=settings.http_timeout)
 
@@ -126,7 +136,7 @@ class KalshiRestClient:
         json_body: JsonDict | None = None,
         authenticated: bool = True,
     ) -> httpx.Response:
-        url = self.settings.resolved_rest_base + path
+        url = self.base_url + path
         headers = self._headers(method, url, authenticated)
         if json_body is not None:
             headers["Content-Type"] = "application/json"
@@ -161,31 +171,43 @@ class KalshiRestClient:
             title=series.get("title") or "",
         )
 
-    def list_open_markets(self, series_ticker: str) -> list[MarketWindow]:
+    def list_events(self, series_ticker: str, status: str) -> list[MarketWindow]:
+        """Events-first discovery. Rollover uses status=unopened, not markets."""
         series = self.get_series(series_ticker)
         markets: list[MarketWindow] = []
         cursor: str | None = None
         while True:
             params: dict[str, Any] = {
                 "series_ticker": series_ticker,
-                "status": "open",
+                "status": status,
+                "with_nested_markets": "true",
                 "limit": 200,
             }
             if cursor:
                 params["cursor"] = cursor
-            data = self.get_json("/markets", params=params, authenticated=False)
-            for raw in data.get("markets") or []:
-                try:
-                    markets.append(market_from_api(raw, series_ticker, series))
-                except (KeyError, ValueError) as exc:
-                    log.warning("skip_market", ticker=raw.get("ticker"), error=str(exc))
+            data = self.get_json("/events", params=params, authenticated=False)
+            for event in data.get("events") or []:
+                event_ticker = str(event.get("event_ticker") or "")
+                nested = event.get("markets") or []
+                if not nested:
+                    continue
+                for raw in nested:
+                    raw.setdefault("event_ticker", event_ticker)
+                    raw.setdefault("series_ticker", series_ticker)
+                    try:
+                        markets.append(market_from_api(raw, series_ticker, series))
+                    except (KeyError, ValueError) as exc:
+                        log.warning("skip_event_market", ticker=raw.get("ticker"), error=str(exc))
             cursor = data.get("cursor") or None
             if not cursor:
                 break
-        # Prefer soonest-to-close active/open windows.
+        markets.sort(key=lambda m: m.open_time)
+        return markets
+
+    def list_open_markets(self, series_ticker: str) -> list[MarketWindow]:
         live = [
             m
-            for m in markets
+            for m in self.list_events(series_ticker, "open")
             if m.status in {"open", "active", ""} and m.close_time > datetime.now(UTC)
         ]
         live.sort(key=lambda m: m.close_time)
@@ -207,6 +229,12 @@ class KalshiRestClient:
         return self.get_json("/portfolio/orders", params={"status": "resting"})
 
     def create_order(self, body: JsonDict) -> httpx.Response:
+        if self.settings.paper_tape or self.settings.dry_run:
+            raise RuntimeError(
+                "paper-tape / dry-run: POST /portfolio/events/orders is disabled"
+            )
+        if self.purpose != "order":
+            raise RuntimeError("create_order must use the demo order REST client")
         return self.request("POST", "/portfolio/events/orders", json_body=body)
 
     def cancel_order(self, order_id: str, market_ticker: str) -> httpx.Response:
@@ -280,19 +308,15 @@ class KalshiWebSocket:
         self,
         sid: int,
         action: str,
-        market_tickers: list[str],
+        market_tickers: list[str] | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
-        await self._send(
-            {
-                "id": self._next_id(),
-                "cmd": "update_subscription",
-                "params": {
-                    "sids": [sid],
-                    "action": action,
-                    "market_tickers": market_tickers,
-                },
-            }
-        )
+        params: dict[str, Any] = {"sids": [sid], "action": action}
+        if market_tickers:
+            params["market_tickers"] = market_tickers
+        if extra:
+            params.update(extra)
+        await self._send({"id": self._next_id(), "cmd": "update_subscription", "params": params})
 
     async def _send(self, payload: JsonDict) -> None:
         if self._ws is None:
@@ -339,25 +363,37 @@ class KalshiWebSocket:
 
 
 class KalshiClient:
-    """Facade used by the runner: REST plus optional WebSocket."""
+    """Facade: public prod data REST + optional auth WS + demo order REST."""
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         key = load_private_key(settings) if settings.has_credentials() else None
-        self.rest = KalshiRestClient(settings, private_key=key)
+        self.data = KalshiRestClient(
+            settings, base_url=settings.resolved_data_rest, purpose="data"
+        )
+        self.rest = KalshiRestClient(
+            settings,
+            base_url=settings.resolved_order_rest,
+            private_key=key,
+            purpose="order",
+        )
         self.ws = KalshiWebSocket(settings, private_key=key) if key is not None else None
 
     def close(self) -> None:
+        self.data.close()
         self.rest.close()
 
     def get_series(self, series_ticker: str) -> SeriesMeta:
-        return self.rest.get_series(series_ticker)
+        return self.data.get_series(series_ticker)
 
     def list_open_markets(self, series_ticker: str) -> list[MarketWindow]:
-        return self.rest.list_open_markets(series_ticker)
+        return self.data.list_open_markets(series_ticker)
+
+    def list_events(self, series_ticker: str, status: str) -> list[MarketWindow]:
+        return self.data.list_events(series_ticker, status)
 
     def get_orderbook(self, ticker: str) -> JsonDict:
-        return self.rest.get_orderbook(ticker)
+        return self.data.get_orderbook(ticker)
 
 
 class MockKalshiClient:
@@ -402,6 +438,25 @@ class MockKalshiClient:
     def list_open_markets(self, series_ticker: str) -> list[MarketWindow]:
         market = self._markets.get(series_ticker)
         return [market] if market else []
+
+    def list_events(self, series_ticker: str, status: str) -> list[MarketWindow]:
+        from datetime import timedelta
+
+        if status == "open":
+            return self.list_open_markets(series_ticker)
+        if status != "unopened":
+            return []
+        now = datetime.now(UTC)
+        nxt = MarketWindow(
+            ticker=f"{series_ticker}-MOCK-NEXT",
+            event_ticker=f"{series_ticker}-MOCK-NEXT",
+            series_ticker=series_ticker,
+            title=f"{series_ticker} mock next",
+            status="initialized",
+            open_time=now + timedelta(minutes=10),
+            close_time=now + timedelta(minutes=25),
+        )
+        return [nxt]
 
     def get_orderbook(self, ticker: str) -> JsonDict:
         return self._books.get(

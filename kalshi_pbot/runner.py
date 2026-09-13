@@ -1,8 +1,9 @@
-"""Main paper-bot loop: discover → evaluate → risk → execute."""
+"""Main paper-bot loop: discover → evaluate → risk → paper-match / execute."""
 
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, datetime
 
 import structlog
@@ -10,12 +11,14 @@ import structlog
 from kalshi_pbot.config import Settings
 from kalshi_pbot.execution import ExecutionEngine, flatten_intent
 from kalshi_pbot.kalshi_client import KalshiClient, KalshiRestClient, MockKalshiClient
-from kalshi_pbot.market_data import MarketUniverse, OrderBookStore
+from kalshi_pbot.market_data import MarketUniverse, OrderBookStore, parse_cfb_tick, parse_public_trade
 from kalshi_pbot.metrics import compute_metrics, emit_metrics
+from kalshi_pbot.paper_matcher import PaperMatcher
 from kalshi_pbot.portfolio import Portfolio
 from kalshi_pbot.risk_engine import RiskEngine
 from kalshi_pbot.strategy.maker import MakerStrategy
 from kalshi_pbot.strategy.pair_arb import PairArbStrategy
+from kalshi_pbot.tape import JsonlTape
 from kalshi_pbot.types import IntentKind, MarketWindow, OrderBook, QuoteIntent
 
 log = structlog.get_logger(__name__)
@@ -28,7 +31,7 @@ class PaperBot:
             self.client: KalshiClient | MockKalshiClient = MockKalshiClient(settings)
             rest: KalshiRestClient | None = None
         else:
-            if not settings.dry_run and not settings.has_credentials():
+            if settings.live_submit and not settings.has_credentials():
                 raise RuntimeError(
                     "Demo submit requires KALSHI_API_KEY_ID and a private key. "
                     "Use --dry-run or --mock, or set credentials."
@@ -38,18 +41,25 @@ class PaperBot:
             if not settings.has_credentials():
                 log.warning(
                     "public_data_only",
-                    hint="dry-run against demo REST books; WS/fills need API keys",
+                    hint="prod REST events/books need no key; WS needs demo or read-only prod keys",
                 )
 
+        self.tape = JsonlTape(settings.tape_path)
+        self.matcher = PaperMatcher(
+            latency_ms=settings.latency_ms,
+        )
         self.portfolio = Portfolio(settings)
         self.risk = RiskEngine(settings)
-        self.execution = ExecutionEngine(settings, self.portfolio, rest)
+        self.execution = ExecutionEngine(
+            settings, self.portfolio, rest, matcher=self.matcher, tape=self.tape
+        )
         self.universe = MarketUniverse(settings, self.client)
         self.books = OrderBookStore()
         self.maker = MakerStrategy(settings)
         self.pair_arb = PairArbStrategy(settings)
         self._stop = asyncio.Event()
-        self._ob_sid: int | None = None
+        self._last_tob_ms = 0
+        self._last_wipe = 0
 
     def stop(self) -> None:
         self._stop.set()
@@ -58,8 +68,13 @@ class PaperBot:
         log.info(
             "bot_start",
             env=self.settings.env,
-            rest=self.settings.resolved_rest_base,
+            data_rest=self.settings.resolved_data_rest,
+            order_rest=self.settings.resolved_order_rest,
+            ws=self.settings.resolved_ws_url,
             dry_run=self.settings.dry_run,
+            paper_tape=self.settings.paper_tape,
+            latency_ms=self.settings.latency_ms,
+            live_submit=self.settings.live_submit,
             mock=isinstance(self.client, MockKalshiClient),
             series=list(self.settings.series_tickers),
             bankroll=str(self.settings.bankroll),
@@ -103,22 +118,68 @@ class PaperBot:
         if ws is None:
             return
         tickers = list(self.universe.markets)
-        await ws.subscribe(
-            ["ticker", "market_lifecycle_v2", "fill", "market_positions", "user_orders"],
-        )
         if tickers:
             await ws.subscribe(
-                ["orderbook_delta"],
+                ["orderbook_delta", "trade"],
                 market_tickers=tickers,
                 extra={"use_yes_price": False},
             )
-        log.info("ws_subscribed", tickers=tickers)
+        await ws.subscribe(["ticker", "market_lifecycle_v2"])
+        cfb = ["cfbenchmarks_value"]
+        if self.settings.cfb_5hz:
+            cfb.append("cfbenchmarks_value_5hz")
+        await ws.subscribe(cfb, extra={"index_ids": self.settings.cfb_index_ids()})
+        if self.settings.live_submit:
+            await ws.subscribe(["fill", "market_positions", "user_orders"])
+        log.info(
+            "ws_subscribed",
+            tickers=tickers,
+            channels=["orderbook_delta", "trade", "ticker", "market_lifecycle_v2", *cfb],
+            index_ids=self.settings.cfb_index_ids(),
+        )
 
     def _on_ws(self, message: dict) -> None:
         kind = message.get("type")
         if kind in {"orderbook_snapshot", "orderbook_delta"}:
-            self.books.handle_ws(message)
-        elif kind == "fill":
+            touch = self.books.handle_ws(message)
+            if touch is not None and touch.old_size != touch.new_size:
+                body = message.get("msg") or message
+                self.matcher.enqueue_size_change(
+                    ticker=touch.ticker,
+                    outcome=touch.outcome,
+                    price=touch.price,
+                    old_size=touch.old_size,
+                    new_size=touch.new_size,
+                    ts_ms=_ws_ts_ms(body),
+                )
+        elif kind == "trade":
+            trade = parse_public_trade(message)
+            if trade:
+                self.matcher.enqueue_trade(trade)
+                if self.tape:
+                    self.tape.write(
+                        "trade",
+                        ticker=trade.market_ticker,
+                        yes_price=trade.yes_price,
+                        count=trade.count,
+                        taker=trade.taker_outcome.value,
+                    )
+        elif kind in {"ticker", "market_lifecycle_v2"}:
+            body = message.get("msg") or {}
+            if self.tape:
+                self.tape.write(str(kind), **{k: body[k] for k in list(body)[:8]})
+            log.info("ws_lifecycle" if kind == "market_lifecycle_v2" else "ws_ticker", type=kind)
+        elif kind in {"cfbenchmarks_value", "cfbenchmarks_value_5hz"}:
+            tick = parse_cfb_tick(message)
+            if tick and self.tape:
+                self.tape.write(
+                    "cfb",
+                    index_id=tick.index_id,
+                    value=tick.value,
+                    avg_60s=tick.avg_60s,
+                    hz="5" if kind.endswith("5hz") else "1",
+                )
+        elif kind == "fill" and self.settings.live_submit:
             self._handle_fill_msg(message.get("msg") or {})
         elif kind == "error":
             log.warning("ws_error", msg=message.get("msg"))
@@ -154,7 +215,11 @@ class PaperBot:
 
     def step(self, now: datetime | None = None) -> list[QuoteIntent]:
         now = now or datetime.now(UTC)
+        now_ms = int(now.timestamp() * 1000)
         self.portfolio.reset_day_if_needed(now)
+        self._drain_matcher(now_ms)
+        self._maybe_tob(now_ms)
+
         books = {
             t: b
             for t, b in (
@@ -185,7 +250,6 @@ class PaperBot:
                 continue
             intents = self._decide(market, book, snapshot)
             for intent in intents:
-                # Skip if we already have a resting order on this outcome.
                 if self._already_quoting(intent):
                     continue
                 decision = self.risk.evaluate(
@@ -201,12 +265,68 @@ class PaperBot:
                         kind=intent.kind.value,
                     )
                     continue
-                self.execution.submit(intent)
+                self.execution.submit(intent, book=book)
                 submitted.append(intent)
                 snapshot = self.portfolio.snapshot(books)
 
         emit_metrics(compute_metrics(self.settings, self.portfolio, self.portfolio.snapshot(books)))
         return submitted
+
+    def _drain_matcher(self, now_ms: int) -> None:
+        fills = self.matcher.drain(now_ms)
+        for paper in fills:
+            fill = self.matcher.to_portfolio_fill(paper)
+            self.portfolio.apply_fill(fill)
+            if self.tape:
+                self.tape.write(
+                    "paper_fill",
+                    order_id=paper.order_id,
+                    ticker=paper.market_ticker,
+                    outcome=paper.outcome.value,
+                    price=paper.price,
+                    count=paper.count,
+                    fee=paper.fee,
+                    notional=paper.price * paper.count,
+                    latency_ms=paper.latency_ms,
+                    reason=paper.reason,
+                )
+        if self.matcher.ambiguous_wipes > self._last_wipe:
+            for event in self.matcher.wipe_events[self._last_wipe :]:
+                if self.tape:
+                    self.tape.write("ambiguous_wipe", **event)
+            self._last_wipe = self.matcher.ambiguous_wipes
+
+    def _maybe_tob(self, now_ms: int) -> None:
+        if now_ms - self._last_tob_ms < self.settings.tob_heartbeat_ms:
+            return
+        self._last_tob_ms = now_ms
+        for market in self.universe.markets.values():
+            book = self.books.get(market.ticker)
+            if book is None:
+                continue
+            tob = book.tob()
+            log.info(
+                "tob",
+                ticker=tob.ticker,
+                yes_bid=str(tob.yes_bid),
+                yes_ask=str(tob.yes_ask),
+                no_bid=str(tob.no_bid),
+                no_ask=str(tob.no_ask),
+                mid=str(tob.mid_yes),
+                spread=str(tob.spread_yes),
+            )
+            if self.tape:
+                self.tape.write(
+                    "tob",
+                    ticker=tob.ticker,
+                    yes_bid=tob.yes_bid,
+                    yes_ask=tob.yes_ask,
+                    no_bid=tob.no_bid,
+                    no_ask=tob.no_ask,
+                    mid_yes=tob.mid_yes,
+                    spread_yes=tob.spread_yes,
+                    seq=tob.seq,
+                )
 
     def _decide(
         self,
@@ -238,8 +358,6 @@ class PaperBot:
         outcome = pos.unpaired_outcome
         if outcome is None:
             return
-        # Hitting our own bid to dump the unpaired side would add taker risk;
-        # only flatten if a bid exists on that outcome.
         bid = book.best_yes_bid() if outcome.value == "yes" else book.best_no_bid()
         if bid is None:
             log.warning("flatten_no_bid", ticker=market.ticker, outcome=outcome.value)
@@ -251,9 +369,6 @@ class PaperBot:
             pos.unpaired_qty,
             bid,
         )
-        # Flattening sells the unpaired outcome. V2 ask on YES sells YES;
-        # for a long NO we buy YES / sell NO via the YES bid... treat as
-        # reduce-only taker at the outcome bid (give the inventory away).
         intent = QuoteIntent(
             market_ticker=intent.market_ticker,
             event_ticker=intent.event_ticker,
@@ -270,9 +385,15 @@ class PaperBot:
         )
         decision = self.risk.evaluate(intent, snapshot, close_time=market.close_time, now=now)
         if decision.allowed:
-            self.execution.submit(intent)
+            self.execution.submit(intent, book=book)
         else:
             log.info("flatten_blocked", detail=decision.detail)
+
+
+def _ws_ts_ms(body: dict) -> int:
+    if body.get("ts_ms"):
+        return int(body["ts_ms"])
+    return int(time.time() * 1000)
 
 
 def run_bot(settings: Settings) -> None:
