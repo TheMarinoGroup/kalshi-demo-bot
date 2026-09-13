@@ -245,7 +245,8 @@ The desk is wired to live bot/paper state. Risk Desk MUST-SHOW panels:
 
 Prioritized Dig #4 fields on each live 15m card: **TTC zone** GREEN/AMBER/RED
 (>180 / 180–60 / ≤60), **NO NEW RISK** banner on `last60s_lock`, TOB with
-sizes + `bid_sum`/`ask_sum` + arb flag, `util_open` $/$50, `util_onesided`
+sizes + `bid_sum`/`ask_sum`, UNDERROUND vs REGIME A/TAKER-ARB (never a green
+ARB chip for underround), `util_open` $/$50, `util_onesided`
 $/$30, `util_windows` n/2, `day_pnl_net` vs −$20 (incl. unsettled),
 `settlement_ts` + `capital_free_at = max(settlement_ts, close+60–90s)`
 (**not** `expected_expiration`), `floor_strike` + CFB avg60/qtr_avg with

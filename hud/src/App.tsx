@@ -173,13 +173,18 @@ function WindowPanel({ win }: { win: WindowCard }) {
         </div>
         <div>
           <label>BID Σ / ASK Σ</label>
-          <b className={win.arb ? "up" : "cyan"}>
+          <b className={win.arb_taker_eligible ? "up" : "cyan"}>
             {px(win.bid_sum)} / {px(win.ask_sum)}
           </b>
         </div>
       </div>
       <div className="tob-meta">
-        <span className={cls("pill", win.arb ? "ok" : "muted")}>{win.arb ? "ARB" : "NO ARB"}</span>
+        {win.underround ? <span className="pill warn">UNDERROUND</span> : null}
+        {win.arb_taker_eligible ? (
+          <span className="pill ok">REGIME A · TAKER-ARB</span>
+        ) : (
+          <span className="pill muted">NO TAKER-ARB</span>
+        )}
         <span>
           FLOOR {win.floor_strike != null ? win.floor_strike.toLocaleString() : "—"}
         </span>

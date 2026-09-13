@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import Any
 
 from kalshi_pbot.config import CFB_INDEX, CLIP_MAX, CLIP_MIN, SETTLE_RECYCLE_BAND, Settings
+from kalshi_pbot.fees import pair_cost
 from kalshi_pbot.metrics import compute_metrics
 from kalshi_pbot.risk_engine import (
     capital_free_at,
@@ -149,26 +150,59 @@ def _cfb_block(bot: Any, series: str) -> dict[str, Any]:
     }
 
 
-def _book_depth(book: OrderBook | None, min_edge: Decimal) -> dict[str, Any]:
+def _book_depth(
+    book: OrderBook | None,
+    min_edge: Decimal,
+    *,
+    fee_type: str = "quadratic",
+    multiplier: Decimal = Decimal("1"),
+) -> dict[str, Any]:
+    """Split Regime B underround from Regime A taker-arb. Never alias them as ARB."""
+    empty = {
+        "yes_bid_sz": None,
+        "no_bid_sz": None,
+        "yes_ask_sz": None,
+        "no_ask_sz": None,
+        "bid_sum": None,
+        "ask_sum": None,
+        "ask_sum_plus_fees": None,
+        "underround": False,
+        "arb_taker_eligible": False,
+        "arb": False,  # reserved for Regime A only; never underround
+    }
     if book is None:
-        return {
-            "yes_bid_sz": None,
-            "no_bid_sz": None,
-            "yes_ask_sz": None,
-            "no_ask_sz": None,
-            "bid_sum": None,
-            "ask_sum": None,
-            "arb": False,
-        }
+        return empty
     bid_sum = book.bid_sum()
+    ask_sum = book.ask_sum()
+    yes_ask = book.implied_yes_ask()
+    no_ask = book.implied_no_ask()
+    underround = bool(bid_sum is not None and bid_sum < Decimal("1") - min_edge)
+    ask_plus_fees = None
+    taker_ok = False
+    if yes_ask is not None and no_ask is not None:
+        _premium, fees = pair_cost(
+            yes_ask,
+            no_ask,
+            Decimal("1"),
+            yes_is_taker=True,
+            no_is_taker=True,
+            fee_type=fee_type,
+            multiplier=multiplier,
+        )
+        ask_plus_fees = ask_sum + fees if ask_sum is not None else None
+        # Regime A: lock by lifting both implied asks after taker fees.
+        taker_ok = bool(ask_plus_fees is not None and ask_plus_fees < Decimal("1"))
     return {
         "yes_bid_sz": _f(book.best_yes_bid_size()),
         "no_bid_sz": _f(book.best_no_bid_size()),
         "yes_ask_sz": _f(book.best_no_bid_size()),  # implied ask size = opposite bid
         "no_ask_sz": _f(book.best_yes_bid_size()),
         "bid_sum": _f(bid_sum),
-        "ask_sum": _f(book.ask_sum()),
-        "arb": bool(bid_sum is not None and bid_sum < Decimal("1") - min_edge),
+        "ask_sum": _f(ask_sum),
+        "ask_sum_plus_fees": _f(ask_plus_fees),
+        "underround": underround,
+        "arb_taker_eligible": taker_ok,
+        "arb": taker_ok,
     }
 
 
@@ -269,7 +303,12 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
             any_last_60 = True
         if violation:
             any_violation = True
-        depth = _book_depth(book, settings.min_edge)
+        depth = _book_depth(
+            book,
+            settings.min_edge,
+            fee_type=market.fee_type,
+            multiplier=market.fee_multiplier,
+        )
         free_at = capital_free_at(
             market.close_time,
             settings.effective_settle_recycle_seconds,
@@ -308,6 +347,9 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
                 "no_ask_sz": depth["no_ask_sz"],
                 "bid_sum": depth["bid_sum"],
                 "ask_sum": depth["ask_sum"],
+                "ask_sum_plus_fees": depth["ask_sum_plus_fees"],
+                "underround": depth["underround"],
+                "arb_taker_eligible": depth["arb_taker_eligible"],
                 "arb": depth["arb"],
                 "spread": _f(tob.spread_yes) if tob else None,
                 "mid": _f(tob.mid_yes) if tob else None,

@@ -7,10 +7,11 @@ from fastapi.testclient import TestClient
 
 from kalshi_pbot.config import CLIP_MAX, CLIP_MIN, Settings
 from kalshi_pbot.hud_server import HudHub, create_app
-from kalshi_pbot.hud_state import MidHistory, _mode_block, build_snapshot
+from kalshi_pbot.hud_state import MidHistory, _book_depth, _mode_block, build_snapshot
 from kalshi_pbot.risk_engine import classify_kill
 from kalshi_pbot.runner import PaperBot
 from kalshi_pbot.types import Fill, MarketWindow, Outcome, RestingOrder
+from tests.conftest import book
 
 
 def _fill(
@@ -76,7 +77,9 @@ def test_snapshot_must_show_panels_from_mock_bot() -> None:
     assert win["floor_strike"] == 65000
     assert win["bid_sum"] == 0.97  # 0.48 + 0.49
     assert win["ask_sum"] == 1.03
-    assert win["arb"] is True
+    assert win["underround"] is True
+    assert win["arb_taker_eligible"] is False
+    assert win["arb"] is False  # must not flash green ARB for underround
     assert win["yes_bid_sz"] == 40
     assert win["cfb"]["lag_ms"] is None
     assert win["cfb"]["oracle"] is False
@@ -277,3 +280,20 @@ def test_drawdown_and_settled_directional(settings: Settings, now: datetime) -> 
     snap = build_snapshot(bot, MidHistory())
     assert snap["extras"]["settled_directional_pct"] > 0
     assert snap["extras"]["drawdown"] >= 0
+
+
+def test_book_depth_splits_underround_from_taker_arb() -> None:
+    under = _book_depth(book("0.4800", "0.4900"), Decimal("0.02"))
+    assert under["underround"] is True
+    assert under["arb_taker_eligible"] is False
+    assert under["arb"] is False
+    assert under["ask_sum"] == 1.03
+    assert under["ask_sum_plus_fees"] > under["ask_sum"]
+
+    # Crossed book: bid_sum 1.40, ask_sum 0.60 + taker fees still < 1.
+    regime_a = _book_depth(book("0.7000", "0.7000"), Decimal("0.02"))
+    assert regime_a["underround"] is False
+    assert regime_a["arb_taker_eligible"] is True
+    assert regime_a["arb"] is True
+    assert regime_a["ask_sum"] == 0.60
+    assert regime_a["ask_sum_plus_fees"] < 1.0

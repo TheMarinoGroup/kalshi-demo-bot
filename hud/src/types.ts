@@ -42,6 +42,9 @@ export type WindowCard = {
   no_ask_sz?: number | null;
   bid_sum?: number | null;
   ask_sum?: number | null;
+  ask_sum_plus_fees?: number | null;
+  underround?: boolean;
+  arb_taker_eligible?: boolean;
   arb?: boolean;
   mid: number | null;
   spread: number | null;
