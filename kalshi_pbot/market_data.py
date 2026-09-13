@@ -26,6 +26,14 @@ from kalshi_pbot.windows import WindowStore
 
 log = structlog.get_logger(__name__)
 
+_DEAD_STATUSES = {"closed", "settled", "finalized", "determined"}
+
+
+def is_live_window(market: MarketWindow, now: datetime) -> bool:
+    if market.status in _DEAD_STATUSES:
+        return False
+    return market.open_time <= now < market.close_time
+
 
 def parse_book_levels(rows: list[list[str]] | None) -> list[PriceLevel]:
     levels: list[PriceLevel] = []
@@ -228,16 +236,17 @@ class MarketUniverse:
             discovered.extend(opened)
             upcoming.extend(unopened)
 
-        self.store.upsert(discovered + upcoming)
+        catalog = discovered + upcoming
+        self.store.upsert(catalog)
         self.store.persist()
-        self.upcoming = [m for m in upcoming if m.open_time > now]
-
-        live = [
+        # Live clips often sit under events?status=unopened (market status=active)
+        # while events?status=open is the window that just determined.
+        self.upcoming = [
             m
-            for m in discovered
-            if m.close_time > now
-            and m.status not in {"closed", "settled", "finalized", "determined"}
+            for m in catalog
+            if m.open_time > now and m.status not in _DEAD_STATUSES
         ]
+        live = [m for m in catalog if is_live_window(m, now)]
         live.sort(key=lambda m: m.close_time)
 
         chosen: list[MarketWindow] = []

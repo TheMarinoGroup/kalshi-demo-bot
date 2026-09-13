@@ -13,9 +13,8 @@ Py + Pn + fees < 1, i.e. Py+Pn ≲ 0.965 at the mid after fees.
 
 from __future__ import annotations
 
-from decimal import ROUND_CEILING, Decimal
-
 from dataclasses import dataclass
+from decimal import ROUND_CEILING, Decimal
 
 from kalshi_pbot.types import D
 

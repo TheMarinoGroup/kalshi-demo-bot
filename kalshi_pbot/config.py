@@ -38,7 +38,11 @@ CLIP_MAX = Decimal("30")
 DEFAULT_CLIP = Decimal("20")
 DEFAULT_SERIES = ("KXBTC15M", "KXETH15M")
 LATENCY_BUCKETS = (50, 150, 500)
-PROD_HOSTS = ("external-api.kalshi.com", "api.elections.kalshi.com")
+PROD_HOSTS = (
+    "external-api.kalshi.com",
+    "external-api-ws.kalshi.com",
+    "api.elections.kalshi.com",
+)
 CFB_INDEX = {"KXBTC15M": "BRTI", "KXETH15M": "ETHUSD_RTI"}
 
 

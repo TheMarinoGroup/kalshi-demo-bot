@@ -205,11 +205,13 @@ class KalshiRestClient:
         return markets
 
     def list_open_markets(self, series_ticker: str) -> list[MarketWindow]:
-        live = [
-            m
-            for m in self.list_events(series_ticker, "open")
-            if m.status in {"open", "active", ""} and m.close_time > datetime.now(UTC)
-        ]
+        # Event status=open is often the *previous* window (determined).
+        # The live clip is nested under status=unopened with market status=active.
+        now = datetime.now(UTC)
+        found = self.list_events(series_ticker, "open") + self.list_events(
+            series_ticker, "unopened"
+        )
+        live = [m for m in found if _is_live_window(m, now)]
         live.sort(key=lambda m: m.close_time)
         return live
 
@@ -246,6 +248,15 @@ class KalshiRestClient:
 
     def cancel_all_orders(self) -> httpx.Response:
         return self.request("DELETE", "/portfolio/events/orders")
+
+
+_DEAD_STATUSES = {"closed", "settled", "finalized", "determined"}
+
+
+def _is_live_window(market: MarketWindow, now: datetime) -> bool:
+    if market.status in _DEAD_STATUSES:
+        return False
+    return market.open_time <= now < market.close_time
 
 
 class KalshiWebSocket:

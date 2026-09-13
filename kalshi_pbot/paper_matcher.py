@@ -100,7 +100,12 @@ class PaperMatcher:
         order = self.orders.pop(order_id, None)
         if order:
             self.cancelled.append(order_id)
-            log.info("paper_cancel", order_id=order_id, reason=reason, remaining=str(order.remaining))
+            log.info(
+                "paper_cancel",
+                order_id=order_id,
+                reason=reason,
+                remaining=str(order.remaining),
+            )
         return order
 
     def cancel_ticker(self, ticker: str, *, reason: str = "cancel") -> None:

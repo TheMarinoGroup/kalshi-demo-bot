@@ -5,7 +5,12 @@ from decimal import Decimal
 
 from kalshi_pbot.config import Settings
 from kalshi_pbot.kalshi_client import MockKalshiClient
-from kalshi_pbot.market_data import MarketUniverse, OrderBookStore, book_from_rest, parse_public_trade
+from kalshi_pbot.market_data import (
+    MarketUniverse,
+    OrderBookStore,
+    book_from_rest,
+    parse_public_trade,
+)
 from kalshi_pbot.types import MarketWindow, Outcome
 from kalshi_pbot.windows import WindowStore
 
@@ -132,6 +137,45 @@ def test_rollover_drops_closed_and_caps_windows() -> None:
     assert {m.series_ticker for m in chosen} == {"KXBTC15M", "KXETH15M"}
     assert any(m.ticker.endswith("-NEXT") for m in universe.upcoming)
     assert universe.store.path.exists()
+
+
+def test_unopened_active_market_is_selected_live() -> None:
+    """Kalshi leaves the current 15m clip under events?status=unopened."""
+    now = datetime(2026, 9, 13, 20, 50, tzinfo=UTC)
+
+    class Fake:
+        def list_events(self, series_ticker: str, status: str) -> list[MarketWindow]:
+            if status == "open":
+                return [
+                    MarketWindow(
+                        ticker=f"{series_ticker}-DONE",
+                        event_ticker=f"{series_ticker}-DONE",
+                        series_ticker=series_ticker,
+                        title="done",
+                        status="determined",
+                        open_time=now - timedelta(minutes=20),
+                        close_time=now - timedelta(minutes=5),
+                    )
+                ]
+            return [
+                MarketWindow(
+                    ticker=f"{series_ticker}-LIVE",
+                    event_ticker=f"{series_ticker}-LIVE",
+                    series_ticker=series_ticker,
+                    title="live",
+                    status="active",
+                    open_time=now - timedelta(minutes=5),
+                    close_time=now + timedelta(minutes=10),
+                )
+            ]
+
+        def list_open_markets(self, series_ticker: str) -> list[MarketWindow]:
+            return []
+
+    settings = Settings(series="KXBTC15M", dry_run=True, max_windows=2)
+    universe = MarketUniverse(settings, Fake())  # type: ignore[arg-type]
+    chosen = universe.refresh(now=now)
+    assert [m.ticker for m in chosen] == ["KXBTC15M-LIVE"]
 
 
 def test_events_first_persists_windows(tmp_path) -> None:

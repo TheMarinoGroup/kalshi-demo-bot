@@ -11,7 +11,12 @@ import structlog
 from kalshi_pbot.config import Settings
 from kalshi_pbot.execution import ExecutionEngine, flatten_intent
 from kalshi_pbot.kalshi_client import KalshiClient, KalshiRestClient, MockKalshiClient
-from kalshi_pbot.market_data import MarketUniverse, OrderBookStore, parse_cfb_tick, parse_public_trade
+from kalshi_pbot.market_data import (
+    MarketUniverse,
+    OrderBookStore,
+    parse_cfb_tick,
+    parse_public_trade,
+)
 from kalshi_pbot.metrics import compute_metrics, emit_metrics
 from kalshi_pbot.paper_matcher import PaperMatcher
 from kalshi_pbot.portfolio import Portfolio

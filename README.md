@@ -17,7 +17,9 @@ REST (no key) is the **data** default.
 
 1. **Events-first rollover** via `GET /events?status=open` and
    `GET /events?status=unopened` (not `/markets?status=unopened`) for
-   `KXBTC15M` + `KXETH15M`. Windows are persisted to `data/windows.json`.
+   `KXBTC15M` + `KXETH15M`. The live 15m clip is usually a nested
+   `active` market under `status=unopened`; `status=open` is often the
+   window that just determined. Windows persist to `data/windows.json`.
 2. Rebuilds the Kalshi **bids-only** book. Implied ask = `1 − opposite bid`.
    Emits a **100 ms top-of-book heartbeat**.
 3. Auth WS (demo or read-only prod): `orderbook_delta` + `trade` + `ticker` +
