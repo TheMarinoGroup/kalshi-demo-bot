@@ -15,6 +15,10 @@ This is still demo/paper only. Production *order* hosts are refused unless you
 set both `KALSHI_ENV=production` and `KALSHI_ALLOW_PRODUCTION=1`. Public prod
 REST (no key) is the **data** default.
 
+HTTP **429** is a rate limit: the bot retries public REST with backoff (honors
+`Retry-After`). Wait a minute if you just hammered `/events` before restarting
+`kalshi-pbot hud`.
+
 ## What it does
 
 1. **Events-first rollover** via `GET /events?status=open` and

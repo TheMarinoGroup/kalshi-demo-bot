@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from kalshi_pbot.config import Settings
 from kalshi_pbot.runner import PaperBot
 from kalshi_pbot.types import Liquidity
@@ -37,3 +39,30 @@ def test_discover_once_mock() -> None:
     series = {m.series_ticker for m in markets}
     assert "KXBTC15M" in series
     assert len(markets) <= 2
+
+
+async def test_run_does_not_burst_discover_after_startup() -> None:
+    """discover_seconds is 15s; the loop must not refresh again immediately."""
+    settings = Settings(
+        mock=True,
+        dry_run=True,
+        series="KXBTC15M",
+        loop_seconds=0.01,
+        discover_seconds=15.0,
+    )
+    bot = PaperBot(settings)
+    calls = {"n": 0}
+    original = bot.universe.refresh
+
+    def counted(*args, **kwargs):
+        calls["n"] += 1
+        return original(*args, **kwargs)
+
+    bot.universe.refresh = counted  # type: ignore[method-assign]
+
+    async def stop_soon() -> None:
+        await asyncio.sleep(0.05)
+        bot.stop()
+
+    await asyncio.gather(bot.run(), stop_soon())
+    assert calls["n"] == 1

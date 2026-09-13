@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -228,13 +229,20 @@ class MarketUniverse:
         now = now or datetime.now(UTC)
         discovered: list[MarketWindow] = []
         upcoming: list[MarketWindow] = []
-        for series in self.settings.series_tickers:
+        delay = 0.0 if self.settings.mock else self.settings.discover_series_delay
+        for index, series in enumerate(self.settings.series_tickers):
+            if index > 0 and delay > 0:
+                time.sleep(delay)
             try:
                 opened = self.source.list_events(series, "open")
+                if delay > 0:
+                    time.sleep(delay)
                 unopened = self.source.list_events(series, "unopened")
             except Exception:
                 log.exception("discover_failed", series=series)
-                opened, unopened = self.source.list_open_markets(series), []
+                # Do not fall back to list_open_markets — that hammers /events
+                # again after 429/5xx retries are already exhausted.
+                opened, unopened = [], []
             discovered.extend(opened)
             upcoming.extend(unopened)
 

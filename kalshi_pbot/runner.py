@@ -96,9 +96,14 @@ class PaperBot:
             settle_rare_tail=self.settings.settle_rare_tail,
             hud=self.settings.hud,
             min_window_minutes=self.settings.min_window_minutes,
+            discover_seconds=self.settings.discover_seconds,
         )
-        self.universe.refresh()
-        self.universe.hydrate_books(self.books)
+        try:
+            self.universe.refresh()
+            self.universe.hydrate_books(self.books)
+        except Exception:
+            log.exception("startup_discover_failed")
+        last_discover = datetime.now(UTC).timestamp()
 
         hud_task: asyncio.Task[None] | None = None
         if self.settings.hud:
@@ -116,7 +121,6 @@ class PaperBot:
             await ws.connect()
             await self._resubscribe()
 
-        last_discover = 0.0
         while not self._stop.is_set():
             now = datetime.now(UTC)
             if now.timestamp() - last_discover >= self.settings.discover_seconds:
