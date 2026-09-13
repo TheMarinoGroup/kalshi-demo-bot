@@ -133,16 +133,16 @@ class RiskEngine:
         return False
 
     def maybe_trip_limits(self, snapshot: PortfolioSnapshot) -> bool:
-        """Latch kill on daily loss, open-notional breach, or one-sided breach."""
+        """Latch kill on daily loss, or open/one-sided at or above the locked cap."""
         tripped = self.maybe_trip_daily(snapshot)
-        if snapshot.open_notional > self.settings.max_open_notional:
+        if snapshot.open_notional >= self.settings.max_open_notional:
             self.trip(
-                f"open_notional {snapshot.open_notional} > {self.settings.max_open_notional}"
+                f"open_notional {snapshot.open_notional} >= {self.settings.max_open_notional}"
             )
             return True
-        if snapshot.unpaired_notional > self.settings.max_onesided:
+        if snapshot.unpaired_notional >= self.settings.max_onesided:
             self.trip(
-                f"onesided {snapshot.unpaired_notional} > {self.settings.max_onesided}"
+                f"onesided {snapshot.unpaired_notional} >= {self.settings.max_onesided}"
             )
             return True
         return tripped or self.kill_active

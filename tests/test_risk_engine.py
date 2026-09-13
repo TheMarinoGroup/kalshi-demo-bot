@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from kalshi_pbot.config import Settings
-from kalshi_pbot.risk_engine import RiskEngine, in_last_seconds
+from kalshi_pbot.risk_engine import RiskEngine, classify_kill, in_last_seconds
 from kalshi_pbot.types import IntentKind, Liquidity, Outcome, QuoteIntent, RejectReason, TimeInForce
 from tests.conftest import empty_snapshot, yes_position
 
@@ -107,7 +107,9 @@ def test_onesided_cap_blocks_more_same_side(settings: Settings, now: datetime) -
     more_yes = _intent(price="0.50", count="20", outcome=Outcome.YES)
     decision = engine.evaluate(more_yes, snap, close_time=close, now=now)
     assert decision.allowed is False
-    assert decision.reason is RejectReason.ONESIDED_CAP
+    # At the $30 cap the kill latch trips; reject still blocks growth past cap.
+    assert decision.reason is RejectReason.KILL_SWITCH
+    assert engine.kill_active
 
 
 def test_onesided_cap_is_aggregate_across_windows(settings: Settings, now: datetime) -> None:
@@ -127,6 +129,34 @@ def test_onesided_cap_is_aggregate_across_windows(settings: Settings, now: datet
     assert decision.reason is RejectReason.ONESIDED_CAP
 
 
+def test_open_and_onesided_kill_latch_at_exact_cap(settings: Settings, now: datetime) -> None:
+    close = now + timedelta(minutes=10)
+    open_engine = RiskEngine(settings)
+    at_open = empty_snapshot(settings, open_notional=Decimal("50"))
+    open_engine.maybe_trip_limits(at_open)
+    assert open_engine.kill_active
+    assert classify_kill(open_engine.kill_reason) == "open"
+    just_under_open = RiskEngine(settings)
+    just_under_open.maybe_trip_limits(empty_snapshot(settings, open_notional=Decimal("49.99")))
+    assert not just_under_open.kill_active
+
+    side_engine = RiskEngine(settings)
+    at_side = empty_snapshot(settings, unpaired_notional=Decimal("30"))
+    side_engine.maybe_trip_limits(at_side)
+    assert side_engine.kill_active
+    assert classify_kill(side_engine.kill_reason) == "one-sided"
+    just_under_side = RiskEngine(settings)
+    just_under_side.maybe_trip_limits(empty_snapshot(settings, unpaired_notional=Decimal("29.99")))
+    assert not just_under_side.kill_active
+    flatten = open_engine.evaluate(
+        _intent(kind=IntentKind.FLATTEN, reduce_only=True),
+        at_open,
+        close_time=close,
+        now=now,
+    )
+    assert flatten.allowed
+
+
 def test_open_breach_trips_kill_code(settings: Settings, now: datetime) -> None:
     engine = RiskEngine(settings)
     close = now + timedelta(minutes=10)
@@ -134,8 +164,6 @@ def test_open_breach_trips_kill_code(settings: Settings, now: datetime) -> None:
     decision = engine.evaluate(_intent(), snap, close_time=close, now=now)
     assert engine.kill_active
     assert decision.reason is RejectReason.KILL_SWITCH
-    from kalshi_pbot.risk_engine import classify_kill
-
     assert classify_kill(engine.kill_reason) == "open"
 
 

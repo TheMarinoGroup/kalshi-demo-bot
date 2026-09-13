@@ -246,8 +246,8 @@ def test_settle_buffer_ignores_expected_expiration(settings: Settings, now: date
 
 def test_kill_codes_and_manual_endpoint(settings: Settings) -> None:
     assert classify_kill("daily_loss -21 <= -20") == "loss"
-    assert classify_kill("open_notional 55 > 50") == "open"
-    assert classify_kill("onesided 35 > 30") == "one-sided"
+    assert classify_kill("open_notional 50 >= 50") == "open"
+    assert classify_kill("onesided 30 >= 30") == "one-sided"
     assert classify_kill("manual") == "manual"
 
     bot = PaperBot(settings)
