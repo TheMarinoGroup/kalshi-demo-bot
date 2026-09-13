@@ -12,6 +12,7 @@ import structlog
 from kalshi_pbot.config import Settings
 from kalshi_pbot.kalshi_client import MarketSource
 from kalshi_pbot.risk_engine import in_last_seconds, recycle_ready
+from kalshi_pbot.series import is_supported_window
 from kalshi_pbot.types import (
     CFBTick,
     D,
@@ -237,7 +238,18 @@ class MarketUniverse:
             discovered.extend(opened)
             upcoming.extend(unopened)
 
-        catalog = discovered + upcoming
+        catalog = [
+            m
+            for m in discovered + upcoming
+            if is_supported_window(m, self.settings.min_window_minutes)
+        ]
+        skipped = len(discovered) + len(upcoming) - len(catalog)
+        if skipped:
+            log.info(
+                "skipped_short_windows",
+                count=skipped,
+                min_minutes=self.settings.min_window_minutes,
+            )
         self.store.upsert(catalog)
         self.store.persist()
         # Live clips often sit under events?status=unopened (market status=active)

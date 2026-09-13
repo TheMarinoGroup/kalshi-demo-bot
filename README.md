@@ -1,7 +1,9 @@
 # kalshi-demo-bot
 
-Paper-trading **sampler** for Kalshi 15-minute crypto Up/Down markets
-(`KXBTC15M`, `KXETH15M`). It is a short-window **liquidity provider /
+Paper-trading **sampler** for Kalshi crypto Up/Down markets at
+**15 minutes or greater only** (primary `KXBTC15M`, `KXETH15M`; later
+1H/4H clips are allowed). It does **not** trade Polymarket-style
+5-minute markets. It is a short-window **liquidity provider /
 statistical scalper**, not a directional crypto book and **not a live trader**.
 
 Research Dig #2 ships a **paper data plane**: public prod REST for events and
@@ -32,6 +34,10 @@ REST (no key) is the **data** default.
    Latency buckets `L ∈ {50, 150, 500}` ms (default 150).
 7. **Zero order POSTs** in the research/paper-tape phase. `--demo-submit` is
    explicit and off by default.
+8. **Bloomberg-style HUD** (`kalshi-pbot hud`) — dark desk: risk meters,
+   live TOB, window countdown (last-60s amber), inventory, paper tape,
+   session PnL. Works on mock or public prod data; never needs live
+   trading.
 
 Settlement oracle (context, not a trading signal): CF Benchmarks **BRTI**
 (BTC) / **ETHUSD_RTI** (ETH) — 60s open average vs 60s close average; ties
@@ -133,7 +139,10 @@ CLI (kalshi-pbot) ── runner.PaperBot
 | `kalshi_pbot/execution.py` | Paper register or `POST /portfolio/events/orders` |
 | `kalshi_pbot/portfolio.py` | Fills, paired PnL, one-sided notional, post-close recycle |
 | `kalshi_pbot/runner.py` | Discover → decide → risk → match / execute |
-| `kalshi_pbot/cli.py` | `run`, `discover`, `status`, `replay`, `flatten` |
+| `kalshi_pbot/cli.py` | `run`, `hud`, `discover`, `status`, `replay`, `flatten` |
+| `kalshi_pbot/series.py` | 15m+ series gate (rejects 5-minute markets) |
+| `kalshi_pbot/hud_state.py` / `hud_server.py` | Snapshot + FastAPI/WebSocket desk feed |
+| `hud/` | Vite + React Bloomberg HUD |
 
 Orders (demo-submit only) use the current **V2 portfolio events API**
 (`POST /portfolio/events/orders`) with `client_order_id` idempotency,
@@ -209,6 +218,33 @@ kalshi-pbot flatten --demo-submit
 `--demo-submit` turns off paper-tape and is the only path that may POST
 `/portfolio/events/orders`. It will not send to production.
 
+## HUD (paper desk)
+
+Bloomberg-terminal aesthetic over the paper sampler. No order POSTs.
+
+```bash
+# Live public 15m books (no API key) + paper matcher + HUD
+kalshi-pbot hud
+
+# Offline synthetic windows
+kalshi-pbot hud --mock
+
+# Same thing from the runner
+kalshi-pbot run --dry-run --hud
+```
+
+Open **http://127.0.0.1:8080**. Frontend is Vite + React, served by the
+bot's FastAPI process (`/api/snapshot`, `/ws`). For UI hot-reload:
+
+```bash
+kalshi-pbot hud --mock          # API/WS on :8080
+cd hud && npm install && npm run dev   # Vite on :5173, proxies to :8080
+```
+
+The desk shows Risk Desk v1 utilization, YES/NO bids and implied asks,
+incomplete-pair inventory, resting paper (maker/taker tags), fill tape,
+session PnL / fee drag, and a carousel of current + next 15m+ windows.
+
 ## Tests
 
 ```bash
@@ -226,8 +262,17 @@ and “no POST in paper-tape”.
 docker compose up --build
 ```
 
-Compose defaults to `kalshi-pbot run --dry-run`. Mount `./secrets` for a demo
-key and `./data` for windows + tape. To submit demo orders:
+Compose defaults to the **desk** (`kalshi-pbot hud`) on port **8080** —
+paper-tape, public prod 15m books, no order POSTs. Mount `./secrets` for
+a demo key and `./data` for windows + tape.
+
+Headless bot (no HUD):
+
+```bash
+docker compose run --rm pbot kalshi-pbot run --dry-run
+```
+
+Demo-submit (explicit, still demo hosts only):
 
 ```bash
 docker compose run --rm pbot kalshi-pbot run --demo-submit
@@ -236,7 +281,7 @@ docker compose run --rm pbot kalshi-pbot run --demo-submit
 ## Out of scope (v1)
 
 Live/production trading, a full 7×24h expectancy runner (module + replay
-only), ML price prediction, and a UI dashboard.
+only), and ML price prediction. The HUD is in scope.
 
 ## Docs used
 

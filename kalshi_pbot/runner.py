@@ -11,6 +11,7 @@ import structlog
 
 from kalshi_pbot.config import Settings
 from kalshi_pbot.execution import ExecutionEngine, flatten_intent
+from kalshi_pbot.hud_state import MidHistory, build_snapshot
 from kalshi_pbot.kalshi_client import KalshiClient, KalshiRestClient, MockKalshiClient
 from kalshi_pbot.market_data import (
     MarketUniverse,
@@ -66,6 +67,8 @@ class PaperBot:
         self._stop = asyncio.Event()
         self._last_tob_ms = 0
         self._last_wipe = 0
+        self.mid_history = MidHistory()
+        self.hud_hub = None
 
     def stop(self) -> None:
         self._stop.set()
@@ -90,9 +93,21 @@ class PaperBot:
             clip=str(self.settings.clip),
             settle_recycle_s=self.settings.effective_settle_recycle_seconds,
             settle_rare_tail=self.settings.settle_rare_tail,
+            hud=self.settings.hud,
+            min_window_minutes=self.settings.min_window_minutes,
         )
         self.universe.refresh()
         self.universe.hydrate_books(self.books)
+
+        hud_task: asyncio.Task[None] | None = None
+        if self.settings.hud:
+            from kalshi_pbot.hud_server import HudHub, serve_hud
+
+            self.hud_hub = HudHub()
+            self.hud_hub.publish(build_snapshot(self, self.mid_history))
+            hud_task = asyncio.create_task(
+                serve_hud(self, self.hud_hub, self.mid_history), name="kalshi-hud"
+            )
 
         ws = getattr(self.client, "ws", None)
         if ws is not None and self.settings.has_credentials() and not self.settings.mock:
@@ -116,6 +131,8 @@ class PaperBot:
             except TimeoutError:
                 continue
 
+        if hud_task is not None:
+            hud_task.cancel()
         if ws is not None:
             await ws.close()
         self.client.close()
@@ -253,6 +270,7 @@ class PaperBot:
 
         if self.risk.kill_active:
             emit_metrics(compute_metrics(self.settings, self.portfolio, snapshot))
+            self._publish_hud(now)
             return submitted
 
         for market in self.universe.tradable(now=now):
@@ -281,7 +299,12 @@ class PaperBot:
                 snapshot = self.portfolio.snapshot(books)
 
         emit_metrics(compute_metrics(self.settings, self.portfolio, self.portfolio.snapshot(books)))
+        self._publish_hud(now)
         return submitted
+
+    def _publish_hud(self, now: datetime) -> None:
+        if self.hud_hub is not None:
+            self.hud_hub.publish(build_snapshot(self, self.mid_history, now))
 
     def _apply_lifecycle_result(self, body: dict) -> None:
         ticker = str(body.get("market_ticker") or body.get("ticker") or "")
@@ -394,6 +417,7 @@ class PaperBot:
                     spread_yes=tob.spread_yes,
                     seq=tob.seq,
                 )
+            self.mid_history.push(tob.ticker, tob.mid_yes, tob.spread_yes, now_ms)
 
     def _decide(
         self,

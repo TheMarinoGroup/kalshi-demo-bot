@@ -18,6 +18,8 @@ dependencies = [
     "pydantic-settings>=2.4",
     "structlog>=24.4",
     "typer>=0.12",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
 ]
 
 [project.optional-dependencies]
@@ -32,6 +34,9 @@ kalshi-pbot = "kalshi_pbot.cli:app"
 
 [tool.setuptools.packages.find]
 include = ["kalshi_pbot*"]
+
+[tool.setuptools.package-data]
+kalshi_pbot = ["hud_static/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -27,6 +27,7 @@ def _settings(
     bankroll: float | None = None,
     latency: int | None = None,
     tape: str | None = None,
+    hud: bool = False,
 ) -> Settings:
     overrides: dict[str, object] = {}
     if mock:
@@ -48,6 +49,8 @@ def _settings(
         overrides["latency_ms"] = latency
     if tape:
         overrides["tape_path"] = tape
+    if hud:
+        overrides["hud"] = True
     settings = load_settings(**overrides)
     if demo_submit and not settings.has_credentials():
         raise typer.BadParameter(
@@ -94,6 +97,10 @@ def run(
         str | None,
         typer.Option("--tape", help="JSONL paper-tape path."),
     ] = None,
+    hud: Annotated[
+        bool,
+        typer.Option("--hud", help="Serve the Bloomberg-style desk HUD (default :8080)."),
+    ] = False,
 ) -> None:
     """Discover windows, evaluate maker/pair quotes, and paper-tape or demo-submit."""
     if latency not in LATENCY_BUCKETS:
@@ -106,10 +113,35 @@ def run(
         bankroll=bankroll,
         latency=latency,
         tape=tape,
+        hud=hud,
     )
     configure_logging(settings.log_level, settings.log_json)
     if demo_submit:
         log.warning("demo_submit_enabled", order_rest=settings.resolved_order_rest)
+    from kalshi_pbot.runner import run_bot
+
+    run_bot(settings)
+
+
+@app.command()
+def hud(
+    mock: Annotated[
+        bool,
+        typer.Option("--mock", help="Synthetic 15m books (still paper-tape)."),
+    ] = False,
+    series: Annotated[str | None, typer.Option("--series")] = None,
+    latency: Annotated[int, typer.Option("--latency")] = 150,
+    host: Annotated[str, typer.Option("--host")] = "0.0.0.0",
+    port: Annotated[int, typer.Option("--port")] = 8080,
+) -> None:
+    """Run the paper bot and open the desk HUD. Never POSTs orders."""
+    if latency not in LATENCY_BUCKETS:
+        raise typer.BadParameter(f"--latency must be one of {LATENCY_BUCKETS}")
+    settings = _settings(dry_run=True, mock=mock, series=series, latency=latency, hud=True)
+    settings.hud_host = host
+    settings.hud_port = port
+    configure_logging(settings.log_level, settings.log_json)
+    log.info("hud_start", url=f"http://127.0.0.1:{port}", mock=mock, paper_tape=True)
     from kalshi_pbot.runner import run_bot
 
     run_bot(settings)
@@ -171,6 +203,8 @@ def status() -> None:
     typer.echo(f"taker_pair_arb   {settings.taker_pair_arb}")
     typer.echo(f"windows_path     {settings.windows_path}")
     typer.echo(f"tape_path        {settings.tape_path}")
+    typer.echo(f"min_window_min   {settings.min_window_minutes}  (15m+ only)")
+    typer.echo(f"hud              {settings.hud}  (:{settings.hud_port})")
 
 
 @app.command()

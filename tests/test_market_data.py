@@ -114,7 +114,7 @@ def test_rollover_drops_closed_and_caps_windows() -> None:
                     title="a",
                     status="active",
                     open_time=now - timedelta(minutes=5),
-                    close_time=now + timedelta(minutes=5),
+                    close_time=now + timedelta(minutes=10),
                 ),
                 MarketWindow(
                     ticker=f"{series_ticker}-B",
@@ -123,7 +123,7 @@ def test_rollover_drops_closed_and_caps_windows() -> None:
                     title="b",
                     status="active",
                     open_time=now - timedelta(minutes=1),
-                    close_time=now + timedelta(minutes=12),
+                    close_time=now + timedelta(minutes=14),
                 ),
             ]
 

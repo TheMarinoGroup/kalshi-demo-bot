@@ -19,6 +19,7 @@ from typing import Literal
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from kalshi_pbot.series import MIN_WINDOW_MINUTES, filter_series
 from kalshi_pbot.types import D, QuoteMode
 
 DEMO_REST = "https://external-api.demo.kalshi.co/trade-api/v2"
@@ -83,6 +84,11 @@ class Settings(BaseSettings):
     mock: bool = False
 
     series: str = ",".join(DEFAULT_SERIES)
+    # Crypto Up/Down 15m+ only. 5-minute (and shorter) series are refused.
+    min_window_minutes: int = MIN_WINDOW_MINUTES
+    hud: bool = False
+    hud_host: str = "0.0.0.0"
+    hud_port: int = 8080
     clip_dollars: Decimal = DEFAULT_CLIP
     quote_mode: QuoteMode = "one_sided"
     min_edge: Decimal = Decimal("0.02")
@@ -132,6 +138,11 @@ class Settings(BaseSettings):
             raise ValueError("settle_recycle_seconds must be positive")
         if self.settle_rare_tail_seconds <= 0:
             raise ValueError("settle_rare_tail_seconds must be positive")
+        if self.min_window_minutes < MIN_WINDOW_MINUTES:
+            raise ValueError(
+                f"min_window_minutes must be >= {MIN_WINDOW_MINUTES} "
+                "(15m+ crypto Up/Down only; 5-minute markets are not supported)"
+            )
         if self.env == "production" and not self.allow_production:
             raise ValueError(
                 "Production *trading* is disabled. Public prod REST is the data "
@@ -148,7 +159,8 @@ class Settings(BaseSettings):
     @cached_property
     def series_tickers(self) -> tuple[str, ...]:
         items = [s.strip().upper() for s in self.series.split(",") if s.strip()]
-        return tuple(items) or DEFAULT_SERIES
+        kept = filter_series(items, self.min_window_minutes)
+        return kept or DEFAULT_SERIES
 
     @cached_property
     def clip(self) -> Decimal:
