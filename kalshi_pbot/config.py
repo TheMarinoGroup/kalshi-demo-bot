@@ -99,6 +99,9 @@ class Settings(BaseSettings):
     latency_ms: int = 150
     loop_seconds: float = 0.05
     discover_seconds: float = 15.0
+    # Pause between series during events-first discovery so we do not burst
+    # GET /events for KXBTC15M then KXETH15M in a tight loop.
+    discover_series_delay: float = 0.4
     tob_heartbeat_ms: int = 100
     last_seconds: int = LAST_SECONDS_NO_RISK
     # Paper capital velocity: recycle after close + this many seconds.

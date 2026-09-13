@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 from kalshi_pbot.config import Settings
 from kalshi_pbot.kalshi_client import MockKalshiClient, market_from_api
@@ -86,6 +87,31 @@ def test_orderbook_delta_and_seq() -> None:
     assert store.get("T").best_yes_bid() == Decimal("0.40")
 
 
+def test_refresh_sleeps_between_series() -> None:
+    now = datetime(2026, 9, 13, 20, 0, tzinfo=UTC)
+    calls: list[tuple[str, str]] = []
+
+    class Fake:
+        def list_events(self, series_ticker: str, status: str) -> list[MarketWindow]:
+            calls.append((series_ticker, status))
+            return []
+
+        def list_open_markets(self, series_ticker: str) -> list[MarketWindow]:
+            return []
+
+    settings = Settings(
+        series="KXBTC15M,KXETH15M",
+        dry_run=True,
+        discover_series_delay=0.4,
+    )
+    sleeps: list[float] = []
+    with patch("kalshi_pbot.market_data.time.sleep", side_effect=sleeps.append):
+        MarketUniverse(settings, Fake()).refresh(now=now)  # type: ignore[arg-type]
+    assert [c[0] for c in calls] == ["KXBTC15M", "KXBTC15M", "KXETH15M", "KXETH15M"]
+    # Between open/unopened for each series, plus between the two series.
+    assert sleeps == [0.4, 0.4, 0.4]
+
+
 def test_universe_discovers_mock_kxbtc15m() -> None:
     settings = Settings(mock=True, dry_run=True, series="KXBTC15M")
     universe = MarketUniverse(settings, MockKalshiClient(settings))
@@ -145,7 +171,12 @@ def test_rollover_drops_closed_and_caps_windows() -> None:
                 ),
             ]
 
-    settings = Settings(series="KXBTC15M,KXETH15M", dry_run=True, max_windows=2)
+    settings = Settings(
+        series="KXBTC15M,KXETH15M",
+        dry_run=True,
+        max_windows=2,
+        discover_series_delay=0,
+    )
     universe = MarketUniverse(settings, Fake())  # type: ignore[arg-type]
     chosen = universe.refresh(now=now)
     assert len(chosen) == 2
@@ -190,7 +221,7 @@ def test_unopened_active_market_is_selected_live() -> None:
         def list_open_markets(self, series_ticker: str) -> list[MarketWindow]:
             return []
 
-    settings = Settings(series="KXBTC15M", dry_run=True, max_windows=2)
+    settings = Settings(series="KXBTC15M", dry_run=True, max_windows=2, discover_series_delay=0)
     universe = MarketUniverse(settings, Fake())  # type: ignore[arg-type]
     chosen = universe.refresh(now=now)
     assert [m.ticker for m in chosen] == ["KXBTC15M-LIVE"]

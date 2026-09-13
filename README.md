@@ -15,6 +15,10 @@ This is still demo/paper only. Production *order* hosts are refused unless you
 set both `KALSHI_ENV=production` and `KALSHI_ALLOW_PRODUCTION=1`. Public prod
 REST (no key) is the **data** default.
 
+HTTP **429** is a rate limit: the bot retries public REST with backoff (honors
+`Retry-After`). Wait a minute if you just hammered `/events` before restarting
+`kalshi-pbot hud`.
+
 ## What it does
 
 1. **Events-first rollover** via `GET /events?status=open` and
@@ -236,6 +240,8 @@ kalshi-pbot run --dry-run --hud
 # Windows / any env where the kalshi-pbot console script is not on PATH
 python -m kalshi_pbot hud --mock
 ```
+
+On Windows, `start-hud.bat` cds to the repo, opens the desk in a browser after ~4s, and runs `python -m kalshi_pbot hud`.
 
 Open **http://127.0.0.1:8080**. Frontend is Vite + React, served by the
 bot's FastAPI process (`/api/snapshot`, `/ws`). For UI hot-reload:

@@ -9,10 +9,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import random
 import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from decimal import Decimal
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
@@ -32,6 +34,41 @@ log = structlog.get_logger(__name__)
 WS_SIGN_PATH = "/trade-api/ws/v2"
 JsonDict = dict[str, Any]
 WsHandler = Callable[[JsonDict], Awaitable[None] | None]
+
+# Public /events (and similar GETs) can 429. Retry discovery-friendly:
+# ~5–8 attempts, start 1–2s, cap 30–60s. Honor Retry-After when present.
+RETRYABLE_STATUS_CODES = frozenset({429, 502, 503, 504})
+HTTP_MAX_ATTEMPTS = 6
+HTTP_RETRY_BASE_SECONDS = 2.0
+HTTP_RETRY_CAP_SECONDS = 45.0
+
+
+def parse_retry_after(response: httpx.Response) -> float | None:
+    """Seconds to wait from Retry-After (delta-seconds or HTTP-date)."""
+    raw = (response.headers.get("Retry-After") or "").strip()
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(raw)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        return max(0.0, (when - datetime.now(UTC)).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def retry_delay_seconds(attempt: int, retry_after: float | None) -> float:
+    """Exponential backoff with jitter; Retry-After wins when positive."""
+    if retry_after is not None and retry_after > 0:
+        return min(HTTP_RETRY_CAP_SECONDS, retry_after)
+    # attempt 0 → 1–2s (base 2s × 50–100% jitter), then 2–4s, 4–8s, …
+    spread = HTTP_RETRY_BASE_SECONDS * (2**attempt)
+    jittered = spread * (0.5 + random.random() * 0.5)
+    return min(HTTP_RETRY_CAP_SECONDS, jittered)
 
 
 def load_private_key(settings: Settings) -> Any:
@@ -128,12 +165,16 @@ class KalshiRestClient:
         base_url: str | None = None,
         private_key: Any | None = None,
         purpose: str = "data",
+        http: httpx.Client | None = None,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         self.settings = settings
         self.base_url = (base_url or settings.resolved_data_rest).rstrip("/")
         self.purpose = purpose
         self._key = private_key
-        self._http = httpx.Client(timeout=settings.http_timeout)
+        self._http = http or httpx.Client(timeout=settings.http_timeout)
+        self._sleep = sleep or time.sleep
+        self._series_cache: dict[str, SeriesMeta] = {}
 
     def close(self) -> None:
         self._http.close()
@@ -186,22 +227,66 @@ class KalshiRestClient:
         return response
 
     def get_json(self, path: str, **kwargs: Any) -> JsonDict:
-        response = self.request("GET", path, **kwargs)
-        response.raise_for_status()
-        return response.json()
+        """GET JSON with retries for 429 / transient 5xx. Does not retry POSTs."""
+        last_response: httpx.Response | None = None
+        for attempt in range(1, HTTP_MAX_ATTEMPTS + 1):
+            try:
+                response = self.request("GET", path, **kwargs)
+            except httpx.TransportError as exc:
+                if attempt >= HTTP_MAX_ATTEMPTS:
+                    raise
+                delay = retry_delay_seconds(attempt - 1, None)
+                log.warning(
+                    "kalshi_http_retry",
+                    attempt=attempt,
+                    max_attempts=HTTP_MAX_ATTEMPTS,
+                    status=None,
+                    path=path,
+                    error=type(exc).__name__,
+                    sleep_s=round(delay, 3),
+                )
+                self._sleep(delay)
+                continue
+            last_response = response
+            if response.status_code < 400:
+                return response.json()
+            retryable = response.status_code in RETRYABLE_STATUS_CODES
+            if retryable and attempt < HTTP_MAX_ATTEMPTS:
+                retry_after = parse_retry_after(response)
+                delay = retry_delay_seconds(attempt - 1, retry_after)
+                log.warning(
+                    "kalshi_http_retry",
+                    attempt=attempt,
+                    max_attempts=HTTP_MAX_ATTEMPTS,
+                    status=response.status_code,
+                    path=path,
+                    retry_after=retry_after,
+                    sleep_s=round(delay, 3),
+                )
+                self._sleep(delay)
+                continue
+            response.raise_for_status()
+        assert last_response is not None
+        last_response.raise_for_status()
+        return last_response.json()
 
     def get_exchange_status(self) -> JsonDict:
         return self.get_json("/exchange/status", authenticated=False)
 
     def get_series(self, series_ticker: str) -> SeriesMeta:
+        cached = self._series_cache.get(series_ticker)
+        if cached is not None:
+            return cached
         data = self.get_json(f"/series/{series_ticker}", authenticated=False)
         series = data.get("series") or data
-        return SeriesMeta(
+        meta = SeriesMeta(
             ticker=series.get("ticker") or series_ticker,
             fee_type=series.get("fee_type") or "quadratic",
             fee_multiplier=D(series.get("fee_multiplier") or 1),
             title=series.get("title") or "",
         )
+        self._series_cache[series_ticker] = meta
+        return meta
 
     def list_events(self, series_ticker: str, status: str) -> list[MarketWindow]:
         """Events-first discovery. Rollover uses status=unopened, not markets."""

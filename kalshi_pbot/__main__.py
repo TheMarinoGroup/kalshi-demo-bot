@@ -1,4 +1,4 @@
-"""Allow ``python -m kalshi_pbot`` (Windows-friendly alternative to the console script)."""
+"""Allow ``python -m kalshi_pbot`` (used by start-hud.bat)."""
 
 from kalshi_pbot.cli import app
 
