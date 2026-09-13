@@ -3,7 +3,8 @@ services:
     build: .
     restart: unless-stopped
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       KALSHI_DRY_RUN: "${KALSHI_DRY_RUN:-true}"
       KALSHI_PAPER_TAPE: "${KALSHI_PAPER_TAPE:-true}"
@@ -20,7 +21,8 @@ services:
     build: .
     profiles: ["headless"]
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       KALSHI_DRY_RUN: "${KALSHI_DRY_RUN:-true}"
       KALSHI_LOG_JSON: "true"

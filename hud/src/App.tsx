@@ -31,8 +31,8 @@ function Spark({ points }: { points: { mid: number }[] }) {
   if (points.length < 2) {
     return <div className="spark empty">NO TAPE</div>;
   }
-  const w = 220;
-  const h = 48;
+  const w = 320;
+  const h = 72;
   const mids = points.map((p) => p.mid);
   const min = Math.min(...mids);
   const max = Math.max(...mids);
@@ -59,20 +59,22 @@ function Meter({
   value,
   max,
   warn,
+  format = "money",
 }: {
   label: string;
   value: number;
   max: number;
   warn?: boolean;
+  format?: "money" | "count";
 }) {
   const pct = max > 0 ? Math.min(100, (value / max) * 100) : 0;
+  const shown =
+    format === "count" ? `${value} / ${max}` : `${money(value)} / ${money(max)}`;
   return (
     <div className="meter">
       <div className="meter-head">
         <span>{label}</span>
-        <span>
-          {money(value)} <em>/ {money(max)}</em>
-        </span>
+        <span>{shown}</span>
       </div>
       <div className="meter-track">
         <div
@@ -137,7 +139,6 @@ function WindowPanel({ win }: { win: WindowCard }) {
 function Desk({ snap, live, clock }: { snap: HudSnapshot; live: boolean; clock: Date }) {
   const { risk, pnl, mode, kill } = snap;
   const liveWins = snap.windows.filter((w) => w.live);
-  const nextWins = snap.windows.filter((w) => !w.live).slice(0, 4);
   const utc = clock.toISOString().slice(11, 23);
 
   return (
@@ -193,11 +194,7 @@ function Desk({ snap, live, clock }: { snap: HudSnapshot; live: boolean; clock: 
             max={risk.daily_kill}
             warn={pnl.daily_loss_util >= 0.7}
           />
-          <Meter
-            label="WINDOWS"
-            value={risk.windows}
-            max={risk.max_windows}
-          />
+          <Meter label="WINDOWS" value={risk.windows} max={risk.max_windows} format="count" />
           <div className="kv">
             <div>
               <span>CLIP</span>
@@ -225,9 +222,9 @@ function Desk({ snap, live, clock }: { snap: HudSnapshot; live: boolean; clock: 
               <p className="empty">No live 15m windows. Waiting on events-first rollover.</p>
             )}
           </div>
-          <h2 className="next-h">WINDOW CAROUSEL · NEXT</h2>
+          <h2 className="next-h">WINDOW CAROUSEL · NEXT 15M+</h2>
           <div className="carousel">
-            {(nextWins.length ? nextWins : snap.upcoming).map((w) => (
+            {snap.upcoming.map((w) => (
               <div key={w.ticker} className="chip">
                 <b>{w.series}</b>
                 <span>{w.ticker}</span>
@@ -235,6 +232,10 @@ function Desk({ snap, live, clock }: { snap: HudSnapshot; live: boolean; clock: 
               </div>
             ))}
           </div>
+          <p className="desk-note">
+            Sampler · 15m+ crypto Up/Down only · paper matcher joins back of book ·
+            no POST /portfolio/events/orders unless --demo-submit
+          </p>
         </main>
 
         <aside className="col book2">
