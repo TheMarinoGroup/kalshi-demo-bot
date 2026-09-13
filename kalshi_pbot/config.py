@@ -37,6 +37,16 @@ CLIP_MIN = Decimal("10")
 CLIP_MAX = Decimal("30")
 DEFAULT_CLIP = Decimal("20")
 DEFAULT_SERIES = ("KXBTC15M", "KXETH15M")
+# Measured close→settlement_ts on public REST, N=8000 finalized
+# KXBTC15M+KXETH15M: p50≈7s, p90≈12s, p99≈59s. ~99% settle within 60s.
+# market.expected_expiration (~close+300s) is NOT actual settlement latency —
+# do not use it as settle-lock. Paper recycle targets the 60–90s band.
+SETTLE_P50_S = 7
+SETTLE_P90_S = 12
+SETTLE_P99_S = 59
+SETTLE_SAMPLE_N = 8000
+SETTLE_RECYCLE_SECONDS = 75
+SETTLE_RARE_TAIL_SECONDS = 300
 LATENCY_BUCKETS = (50, 150, 500)
 PROD_HOSTS = (
     "external-api.kalshi.com",
@@ -84,6 +94,12 @@ class Settings(BaseSettings):
     discover_seconds: float = 15.0
     tob_heartbeat_ms: int = 100
     last_seconds: int = LAST_SECONDS_NO_RISK
+    # Paper capital velocity: recycle after close + this many seconds.
+    # Default 75s sits in the 60–90s band (covers ~p99). Not expected_expiration.
+    settle_recycle_seconds: int = SETTLE_RECYCLE_SECONDS
+    # Conservative rare-tail lock (~expected_expiration horizon). Off by default.
+    settle_rare_tail: bool = False
+    settle_rare_tail_seconds: int = SETTLE_RARE_TAIL_SECONDS
     max_windows: int = MAX_CONCURRENT_WINDOWS
     cfb_5hz: bool = False
     windows_path: str = "data/windows.json"
@@ -112,6 +128,10 @@ class Settings(BaseSettings):
             raise ValueError("bankroll must be positive")
         if self.latency_ms not in LATENCY_BUCKETS:
             raise ValueError(f"latency_ms must be one of {LATENCY_BUCKETS}")
+        if self.settle_recycle_seconds <= 0:
+            raise ValueError("settle_recycle_seconds must be positive")
+        if self.settle_rare_tail_seconds <= 0:
+            raise ValueError("settle_rare_tail_seconds must be positive")
         if self.env == "production" and not self.allow_production:
             raise ValueError(
                 "Production *trading* is disabled. Public prod REST is the data "
@@ -150,6 +170,13 @@ class Settings(BaseSettings):
     @cached_property
     def max_onesided(self) -> Decimal:
         return (self.bankroll * ONESIDED_FRAC).quantize(Decimal("0.01"))
+
+    @cached_property
+    def effective_settle_recycle_seconds(self) -> int:
+        """Post-close wait before paper recycle. Never derived from expected_expiration."""
+        if self.settle_rare_tail:
+            return self.settle_rare_tail_seconds
+        return self.settle_recycle_seconds
 
     @cached_property
     def resolved_data_rest(self) -> str:

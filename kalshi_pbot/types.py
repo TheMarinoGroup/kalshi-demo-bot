@@ -80,6 +80,10 @@ class MarketWindow:
     no_sub_title: str = ""
     fee_type: str = "quadratic"
     fee_multiplier: Decimal = Decimal("1")
+    # Informational only. expected_expiration (~close+300s) is NOT settle-lock.
+    expected_expiration: datetime | None = None
+    settlement_ts: datetime | None = None
+    result: Outcome | None = None
 
     @property
     def window_id(self) -> str:

@@ -11,7 +11,7 @@ import structlog
 
 from kalshi_pbot.config import Settings
 from kalshi_pbot.kalshi_client import MarketSource
-from kalshi_pbot.risk_engine import in_last_seconds
+from kalshi_pbot.risk_engine import in_last_seconds, recycle_ready
 from kalshi_pbot.types import (
     CFBTick,
     D,
@@ -221,6 +221,7 @@ class MarketUniverse:
         self.store = WindowStore(settings.windows_path)
         self.markets: dict[str, MarketWindow] = {}
         self.upcoming: list[MarketWindow] = []
+        self.settling: dict[str, MarketWindow] = {}
 
     def refresh(self, *, now: datetime | None = None) -> list[MarketWindow]:
         now = now or datetime.now(UTC)
@@ -259,21 +260,43 @@ class MarketUniverse:
             chosen.append(market)
             seen_events.add(market.window_id)
 
-        previous = set(self.markets)
+        previous = dict(self.markets)
         current = {m.ticker: m for m in chosen}
-        added = set(current) - previous
-        removed = previous - set(current)
-        if added or removed or self.upcoming:
+        added = set(current) - set(previous)
+        removed = set(previous) - set(current)
+        for ticker in removed:
+            self.settling[ticker] = previous[ticker]
+        for market in catalog:
+            if market.ticker in current:
+                continue
+            if market.close_time <= now:
+                prior = self.settling.get(market.ticker)
+                if prior is None or market.result or market.settlement_ts:
+                    self.settling[market.ticker] = market
+        if added or removed or self.upcoming or self.settling:
             log.info(
                 "universe_rollover",
                 added=sorted(added),
                 removed=sorted(removed),
                 active=[m.ticker for m in chosen],
                 unopened=[m.ticker for m in self.upcoming[:4]],
+                settling=[m.ticker for m in self.due_for_recycle(now)],
                 persisted=str(self.store.path),
             )
         self.markets = current
         return chosen
+
+    def due_for_recycle(self, now: datetime | None = None) -> list[MarketWindow]:
+        now = now or datetime.now(UTC)
+        delay = self.settings.effective_settle_recycle_seconds
+        return [
+            m
+            for m in self.settling.values()
+            if recycle_ready(m.close_time, delay, now, expected_expiration=m.expected_expiration)
+        ]
+
+    def mark_recycled(self, ticker: str) -> MarketWindow | None:
+        return self.settling.pop(ticker, None)
 
     def tradable(self, *, now: datetime | None = None) -> list[MarketWindow]:
         now = now or datetime.now(UTC)

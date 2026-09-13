@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import structlog
@@ -20,11 +21,11 @@ from kalshi_pbot.market_data import (
 from kalshi_pbot.metrics import compute_metrics, emit_metrics
 from kalshi_pbot.paper_matcher import PaperMatcher
 from kalshi_pbot.portfolio import Portfolio
-from kalshi_pbot.risk_engine import RiskEngine
+from kalshi_pbot.risk_engine import RiskEngine, recycle_ready, seconds_since_close
 from kalshi_pbot.strategy.maker import MakerStrategy
 from kalshi_pbot.strategy.pair_arb import PairArbStrategy
 from kalshi_pbot.tape import JsonlTape
-from kalshi_pbot.types import IntentKind, MarketWindow, OrderBook, QuoteIntent
+from kalshi_pbot.types import IntentKind, MarketWindow, OrderBook, Outcome, QuoteIntent
 
 log = structlog.get_logger(__name__)
 
@@ -87,6 +88,8 @@ class PaperBot:
             daily_kill=str(self.settings.daily_loss_limit),
             onesided=str(self.settings.max_onesided),
             clip=str(self.settings.clip),
+            settle_recycle_s=self.settings.effective_settle_recycle_seconds,
+            settle_rare_tail=self.settings.settle_rare_tail,
         )
         self.universe.refresh()
         self.universe.hydrate_books(self.books)
@@ -171,6 +174,8 @@ class PaperBot:
                     )
         elif kind in {"ticker", "market_lifecycle_v2"}:
             body = message.get("msg") or {}
+            if kind == "market_lifecycle_v2":
+                self._apply_lifecycle_result(body)
             if self.tape:
                 self.tape.write(str(kind), **{k: body[k] for k in list(body)[:8]})
             log.info("ws_lifecycle" if kind == "market_lifecycle_v2" else "ws_ticker", type=kind)
@@ -223,6 +228,7 @@ class PaperBot:
         now_ms = int(now.timestamp() * 1000)
         self.portfolio.reset_day_if_needed(now)
         self._drain_matcher(now_ms)
+        self._recycle_settled(now)
         self._maybe_tob(now_ms)
 
         books = {
@@ -276,6 +282,62 @@ class PaperBot:
 
         emit_metrics(compute_metrics(self.settings, self.portfolio, self.portfolio.snapshot(books)))
         return submitted
+
+    def _apply_lifecycle_result(self, body: dict) -> None:
+        ticker = str(body.get("market_ticker") or body.get("ticker") or "")
+        if not ticker:
+            return
+        raw = str(body.get("result") or "").lower()
+        result = Outcome.YES if raw == "yes" else Outcome.NO if raw == "no" else None
+        existing = self.universe.settling.get(ticker) or self.universe.markets.get(ticker)
+        if existing is None or result is None:
+            return
+        updated = replace(
+            existing,
+            result=result,
+            status=str(body.get("status") or existing.status),
+        )
+        if ticker in self.universe.settling:
+            self.universe.settling[ticker] = updated
+        if ticker in self.universe.markets:
+            self.universe.markets[ticker] = updated
+
+    def _recycle_settled(self, now: datetime) -> None:
+        tail = self.settings.settle_rare_tail_seconds
+        for market in list(self.universe.due_for_recycle(now)):
+            if market.result is None:
+                if recycle_ready(market.close_time, tail, now):
+                    log.warning(
+                        "settle_rare_tail_no_result",
+                        ticker=market.ticker,
+                        since_close_s=seconds_since_close(market.close_time, now),
+                        expected_expiration=market.expected_expiration.isoformat()
+                        if market.expected_expiration
+                        else None,
+                        note="expected_expiration is not settle-lock",
+                    )
+                continue
+            self.execution.cancel_market(market.ticker, market.event_ticker, "settlement_recycle")
+            self.portfolio.apply_settlement(
+                market.ticker,
+                market.result,
+                close_time=market.close_time,
+                now=now,
+                settlement_ts=market.settlement_ts,
+            )
+            self.universe.mark_recycled(market.ticker)
+            if self.tape:
+                self.tape.write(
+                    "settlement",
+                    ticker=market.ticker,
+                    result=market.result.value,
+                    recycle_s=seconds_since_close(market.close_time, now),
+                    close_to_settlement_s=(
+                        (market.settlement_ts - market.close_time).total_seconds()
+                        if market.settlement_ts
+                        else None
+                    ),
+                )
 
     def _drain_matcher(self, now_ms: int) -> None:
         fills = self.matcher.drain(now_ms)

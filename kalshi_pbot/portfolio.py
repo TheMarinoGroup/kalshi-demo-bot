@@ -119,19 +119,52 @@ class Portfolio:
         )
 
     def apply_settlement(
-        self, ticker: str, result: Outcome, payout: Decimal = Decimal("1")
+        self,
+        ticker: str,
+        result: Outcome,
+        payout: Decimal = Decimal("1"),
+        *,
+        close_time: datetime | None = None,
+        now: datetime | None = None,
+        settlement_ts: datetime | None = None,
     ) -> None:
+        """Realize leftover inventory and free the window for recycle.
+
+        Recycle is gated by close+settle_recycle_seconds (caller). This
+        method does not read expected_expiration.
+        """
+        now = now or datetime.now(UTC)
+        for order in list(self.resting_for(ticker)):
+            self.drop_resting(order.order_id)
         pos = self.positions.get(ticker)
-        if pos is None:
-            return
-        if result is Outcome.YES:
-            pnl = pos.yes_qty * payout - pos.yes_cost - pos.no_cost
-        else:
-            pnl = pos.no_qty * payout - pos.yes_cost - pos.no_cost
-        pos.realized_pnl += pnl
-        self.realized_pnl += pnl
-        pos.yes_qty = pos.no_qty = Decimal("0")
-        pos.yes_cost = pos.no_cost = Decimal("0")
+        pnl = Decimal("0")
+        if pos is not None:
+            if result is Outcome.YES:
+                pnl = pos.yes_qty * payout - pos.yes_cost - pos.no_cost
+            else:
+                pnl = pos.no_qty * payout - pos.yes_cost - pos.no_cost
+            pos.realized_pnl += pnl
+            self.realized_pnl += pnl
+            pos.yes_qty = pos.no_qty = Decimal("0")
+            pos.yes_cost = pos.no_cost = Decimal("0")
+        recycle_s = None
+        settle_lag_s = None
+        if close_time is not None:
+            close = close_time if close_time.tzinfo else close_time.replace(tzinfo=UTC)
+            recycle_s = (now - close).total_seconds()
+        if close_time is not None and settlement_ts is not None:
+            close = close_time if close_time.tzinfo else close_time.replace(tzinfo=UTC)
+            settled = settlement_ts if settlement_ts.tzinfo else settlement_ts.replace(tzinfo=UTC)
+            settle_lag_s = (settled - close).total_seconds()
+        log.info(
+            "settlement_applied",
+            ticker=ticker,
+            result=result.value,
+            pnl=str(pnl),
+            recycle_s=recycle_s,
+            close_to_settlement_s=settle_lag_s,
+            settle_lock="close+recycle_seconds",
+        )
 
     def snapshot(self, books: dict[str, OrderBook] | None = None) -> PortfolioSnapshot:
         books = books or {}

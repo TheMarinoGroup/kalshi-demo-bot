@@ -37,6 +37,15 @@ Settlement oracle (context, not a trading signal): CF Benchmarks **BRTI**
 (BTC) / **ETHUSD_RTI** (ETH) — 60s open average vs 60s close average; ties
 resolve Yes. The last 60 seconds of each window are treated as toxic.
 
+**Actual settlement is fast.** On public REST, N=8000 finalized
+`KXBTC15M`+`KXETH15M` windows, `close_time` → `settlement_ts` is
+p50≈7s, p90≈12s, p99≈59s (~99% within 60s). The market field
+`expected_expiration` (~close+300s) is **not** settlement latency — do
+not use it as a settle-lock. Paper capital recycles at
+`close + settle_recycle_seconds` (default **75s**, band 60–90s).
+`KALSHI_SETTLE_RARE_TAIL=true` waits 300s instead if you want the
+conservative tail.
+
 Architecture supports later **7×24h tape / expectancy** runs. v1 ships the
 modules (`tape`, `expectancy`) plus the dry-run / paper-tape path.
 
@@ -50,6 +59,8 @@ modules (`tape`, `expectancy`) plus the dry-run / paper-tape path.
 | Daily loss kill (realized + fees + unsettled MTM) | $20 | 2% of bankroll |
 | Max incomplete / one-sided inventory | $30 | 3% of bankroll |
 | Last 60s before `close_time` | no new risk; cancel / flatten only | config |
+| Paper recycle after close | 75s default (60–90s band; p99≈59s) | `KALSHI_SETTLE_RECYCLE_SECONDS` |
+| Rare-tail settle lock | off; 300s if enabled | `KALSHI_SETTLE_RARE_TAIL` — **not** `expected_expiration` |
 | Kill switch | cancel resting, block entries until process restart | — |
 
 Change `KALSHI_BANKROLL` and the percentage limits move with it. Paper only.
@@ -73,10 +84,12 @@ demo-fill confirmation** (`pending_demo_confirm=true` in logs).
   legs). You need `Py + Pn ≲ 0.965` after fees — usually not available,
   because taking both implied asks costs `2 − (yes_bid + no_bid)`.
 
-**Capital velocity.** Tiny clips, recycle after settlement, keep open interest
-low. Unpaired inventory above the one-sided cap is aborted (flatten / do not
-add). Last 60s: cancel quotes; do not complete pairs; flatten unpaired if a
-bid exists.
+**Capital velocity.** Tiny clips, recycle **~60–90s after close** (default
+75s) once a result is known — not 5–6 minutes and not
+`expected_expiration`. Unsettled MTM still counts toward the daily kill
+until recycle. Unpaired inventory above the one-sided cap is aborted
+(flatten / do not add). Last 60s: cancel quotes; do not complete pairs;
+flatten unpaired if a bid exists.
 
 ## Paper matcher
 
@@ -106,7 +119,7 @@ CLI (kalshi-pbot) ── runner.PaperBot
 
 | Module | Role |
 | --- | --- |
-| `kalshi_pbot/config.py` | Dual plane: prod data REST, demo order REST, latency buckets |
+| `kalshi_pbot/config.py` | Dual plane, latency buckets, settle recycle (not expected_expiration) |
 | `kalshi_pbot/kalshi_client.py` | Public `/events` + books; auth WS; order POST refused in paper-tape |
 | `kalshi_pbot/market_data.py` | Events-first rollover, book snapshot/delta, implied asks |
 | `kalshi_pbot/windows.py` | Persist / reload 15m windows |
@@ -118,7 +131,7 @@ CLI (kalshi-pbot) ── runner.PaperBot
 | `kalshi_pbot/fees.py` | Quadratic taker / maker fee + `fee_drag` |
 | `kalshi_pbot/risk_engine.py` | Hard gates (last-60s, daily kill, caps) |
 | `kalshi_pbot/execution.py` | Paper register or `POST /portfolio/events/orders` |
-| `kalshi_pbot/portfolio.py` | Fills, paired PnL, one-sided notional |
+| `kalshi_pbot/portfolio.py` | Fills, paired PnL, one-sided notional, post-close recycle |
 | `kalshi_pbot/runner.py` | Discover → decide → risk → match / execute |
 | `kalshi_pbot/cli.py` | `run`, `discover`, `status`, `replay`, `flatten` |
 

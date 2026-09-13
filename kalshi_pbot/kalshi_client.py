@@ -25,7 +25,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
 from kalshi_pbot.config import Settings
-from kalshi_pbot.types import D, MarketWindow, SeriesMeta
+from kalshi_pbot.types import D, MarketWindow, Outcome, SeriesMeta
 
 log = structlog.get_logger(__name__)
 
@@ -62,6 +62,24 @@ def _parse_dt(value: str | None) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _parse_dt_opt(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return _parse_dt(str(value))
+    except ValueError:
+        return None
+
+
+def _parse_result(raw: JsonDict) -> Outcome | None:
+    value = str(raw.get("result") or raw.get("settlement_result") or "").lower()
+    if value == "yes":
+        return Outcome.YES
+    if value == "no":
+        return Outcome.NO
+    return None
+
+
 def market_from_api(
     raw: JsonDict, series_ticker: str, series: SeriesMeta | None = None
 ) -> MarketWindow:
@@ -78,6 +96,11 @@ def market_from_api(
         no_sub_title=raw.get("no_sub_title") or "",
         fee_type=(series.fee_type if series else raw.get("fee_type") or "quadratic"),
         fee_multiplier=D(series.fee_multiplier if series else raw.get("fee_multiplier") or 1),
+        expected_expiration=_parse_dt_opt(
+            raw.get("expected_expiration_time") or raw.get("expected_expiration")
+        ),
+        settlement_ts=_parse_dt_opt(raw.get("settlement_ts") or raw.get("settled_time")),
+        result=_parse_result(raw),
     )
 
 

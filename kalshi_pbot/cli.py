@@ -159,6 +159,13 @@ def status() -> None:
     typer.echo(f"max_onesided     ${settings.max_onesided}  (3%)")
     typer.echo(f"max_windows      {settings.max_windows}")
     typer.echo(f"last_seconds     {settings.last_seconds}")
+    typer.echo(
+        f"settle_recycle   {settings.effective_settle_recycle_seconds}s  "
+        f"(close→settlement p99≈59s; not expected_expiration)"
+    )
+    typer.echo(
+        f"settle_rare_tail {settings.settle_rare_tail}  ({settings.settle_rare_tail_seconds}s)"
+    )
     typer.echo(f"quote_mode       {settings.quote_mode}")
     typer.echo(f"min_edge         {settings.min_edge}")
     typer.echo(f"taker_pair_arb   {settings.taker_pair_arb}")

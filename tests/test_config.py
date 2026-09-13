@@ -20,6 +20,8 @@ def test_defaults_are_paper_data_plane() -> None:
     assert settings.resolved_order_rest == DEMO_REST
     assert settings.resolved_ws_url == DEMO_WS
     assert settings.latency_ms == 150
+    assert settings.effective_settle_recycle_seconds == 75
+    assert settings.settle_rare_tail is False
 
 
 def test_production_trading_refused_without_override() -> None:

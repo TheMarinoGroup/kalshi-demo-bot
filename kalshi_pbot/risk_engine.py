@@ -2,6 +2,10 @@
 
 Limits rescale with `settings.bankroll`. Kill switch cancels/refuses
 until an explicit reset. Last 60s of each window: no new risk.
+
+Post-close paper recycle is ``close_time + settle_recycle_seconds``
+(default 75s; measured p99≈59s). Do **not** use ``expected_expiration``
+(~+300s) as a settle-lock — that field is not actual settlement latency.
 """
 
 from __future__ import annotations
@@ -35,6 +39,22 @@ def seconds_to_close(close_time: datetime, now: datetime | None = None) -> float
 
 def in_last_seconds(close_time: datetime, last_seconds: int, now: datetime | None = None) -> bool:
     return seconds_to_close(close_time, now) <= last_seconds
+
+
+def seconds_since_close(close_time: datetime, now: datetime | None = None) -> float:
+    return -seconds_to_close(close_time, now)
+
+
+def recycle_ready(
+    close_time: datetime,
+    recycle_seconds: int,
+    now: datetime | None = None,
+    *,
+    expected_expiration: datetime | None = None,
+) -> bool:
+    """True when paper capital may recycle. Ignores expected_expiration."""
+    del expected_expiration  # never a settle-lock
+    return seconds_since_close(close_time, now) >= recycle_seconds
 
 
 @dataclass

@@ -6,7 +6,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from kalshi_pbot.types import D, MarketWindow
+from kalshi_pbot.types import D, MarketWindow, Outcome
 
 
 def _iso(ts: datetime) -> str:
@@ -30,6 +30,11 @@ def window_to_dict(window: MarketWindow) -> dict[str, object]:
         "no_sub_title": window.no_sub_title,
         "fee_type": window.fee_type,
         "fee_multiplier": str(window.fee_multiplier),
+        "expected_expiration": (
+            _iso(window.expected_expiration) if window.expected_expiration else None
+        ),
+        "settlement_ts": _iso(window.settlement_ts) if window.settlement_ts else None,
+        "result": window.result.value if window.result else "",
     }
 
 
@@ -46,7 +51,25 @@ def window_from_dict(raw: dict[str, object]) -> MarketWindow:
         no_sub_title=str(raw.get("no_sub_title") or ""),
         fee_type=str(raw.get("fee_type") or "quadratic"),
         fee_multiplier=D(raw.get("fee_multiplier") or 1),
+        expected_expiration=_parse_opt(raw.get("expected_expiration")),
+        settlement_ts=_parse_opt(raw.get("settlement_ts")),
+        result=_result(raw.get("result")),
     )
+
+
+def _parse_opt(value: object) -> datetime | None:
+    if not value:
+        return None
+    return _parse(str(value))
+
+
+def _result(value: object) -> Outcome | None:
+    raw = str(value or "").lower()
+    if raw == "yes":
+        return Outcome.YES
+    if raw == "no":
+        return Outcome.NO
+    return None
 
 
 class WindowStore:
