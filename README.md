@@ -140,6 +140,7 @@ CLI (kalshi-pbot) ── runner.PaperBot
 | `kalshi_pbot/portfolio.py` | Fills, paired PnL, one-sided notional, post-close recycle |
 | `kalshi_pbot/runner.py` | Discover → decide → risk → match / execute |
 | `kalshi_pbot/cli.py` | `run`, `hud`, `discover`, `status`, `replay`, `flatten` |
+| `kalshi_pbot/__main__.py` | `python -m kalshi_pbot` (same Typer `app` as `kalshi-pbot`) |
 | `kalshi_pbot/series.py` | 15m+ series gate (rejects 5-minute markets) |
 | `kalshi_pbot/hud_state.py` / `hud_server.py` | Snapshot + FastAPI/WebSocket desk feed |
 | `hud/` | Vite + React Bloomberg HUD |
@@ -231,6 +232,9 @@ kalshi-pbot hud --mock
 
 # Same thing from the runner
 kalshi-pbot run --dry-run --hud
+
+# Windows / any env where the kalshi-pbot console script is not on PATH
+python -m kalshi_pbot hud --mock
 ```
 
 Open **http://127.0.0.1:8080**. Frontend is Vite + React, served by the
