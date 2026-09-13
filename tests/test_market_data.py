@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from kalshi_pbot.config import Settings
-from kalshi_pbot.kalshi_client import MockKalshiClient
+from kalshi_pbot.kalshi_client import MockKalshiClient, market_from_api
 from kalshi_pbot.market_data import (
     MarketUniverse,
     OrderBookStore,
@@ -26,6 +26,24 @@ def test_book_from_rest_implied_ask() -> None:
     assert book.best_yes_bid() == Decimal("0.4200")
     assert book.implied_yes_ask() == Decimal("0.4400")
     assert book.spread_yes() == Decimal("0.0200")
+    assert book.bid_sum() == Decimal("0.9800")
+    assert book.ask_sum() == Decimal("1.0200")
+    assert book.best_yes_bid_size() == Decimal("13.00")
+
+
+def test_market_from_api_reads_floor_strike() -> None:
+    market = market_from_api(
+        {
+            "ticker": "KXBTC15M-T",
+            "event_ticker": "KXBTC15M-T",
+            "open_time": "2026-09-13T20:00:00Z",
+            "close_time": "2026-09-13T20:15:00Z",
+            "status": "active",
+            "floor_strike": 65012.5,
+        },
+        "KXBTC15M",
+    )
+    assert market.floor_strike == Decimal("65012.5")
 
 
 def test_orderbook_delta_and_seq() -> None:

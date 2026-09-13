@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from kalshi_pbot.config import SETTLE_RARE_TAIL_SECONDS, SETTLE_RECYCLE_SECONDS, Settings
 from kalshi_pbot.portfolio import Portfolio
-from kalshi_pbot.risk_engine import recycle_ready, seconds_since_close
+from kalshi_pbot.risk_engine import capital_free_at, recycle_ready, seconds_since_close, ttc_zone
 from kalshi_pbot.runner import PaperBot
 from kalshi_pbot.types import Fill, MarketWindow, Outcome
 
@@ -46,6 +46,25 @@ def test_recycle_ready_ignores_expected_expiration(now: datetime) -> None:
     assert seconds_since_close(close, now) == 10
     assert not recycle_ready(close, 75, now, expected_expiration=expired)
     assert recycle_ready(close - timedelta(seconds=65), 75, now, expected_expiration=expired)
+
+
+def test_ttc_zone_green_amber_red() -> None:
+    assert ttc_zone(181) == "GREEN"
+    assert ttc_zone(180) == "AMBER"
+    assert ttc_zone(61) == "AMBER"
+    assert ttc_zone(60) == "RED"
+    assert ttc_zone(-1) == "RED"
+
+
+def test_capital_free_at_is_max_of_settlement_and_recycle(now: datetime) -> None:
+    close = now - timedelta(seconds=10)
+    early = close + timedelta(seconds=7)
+    late = close + timedelta(seconds=120)
+    exp = close + timedelta(seconds=300)
+    plan = close + timedelta(seconds=75)
+    assert capital_free_at(close, 75, settlement_ts=early, expected_expiration=exp) == plan
+    assert capital_free_at(close, 75, settlement_ts=late, expected_expiration=exp) == late
+    assert not recycle_ready(close, 75, now, settlement_ts=late, expected_expiration=exp)
 
 
 def test_settlement_frees_window_slot(settings: Settings, now: datetime) -> None:

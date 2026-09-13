@@ -11,7 +11,7 @@ Post-close paper recycle is ``close_time + settle_recycle_seconds``
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from kalshi_pbot.config import CLIP_MAX, CLIP_MIN, Settings
@@ -45,16 +45,50 @@ def seconds_since_close(close_time: datetime, now: datetime | None = None) -> fl
     return -seconds_to_close(close_time, now)
 
 
+def ttc_zone(seconds_to_close: float) -> str:
+    """GREEN >180s, AMBER 180–60s, RED ≤60s (includes last-60s lock and after close)."""
+    if seconds_to_close > 180:
+        return "GREEN"
+    if seconds_to_close > 60:
+        return "AMBER"
+    return "RED"
+
+
+def _aware(ts: datetime) -> datetime:
+    return ts if ts.tzinfo else ts.replace(tzinfo=UTC)
+
+
+def capital_free_at(
+    close_time: datetime,
+    recycle_seconds: int,
+    *,
+    settlement_ts: datetime | None = None,
+    expected_expiration: datetime | None = None,
+) -> datetime:
+    """Unlock stamp = max(settlement_ts, close + 60–90s plan). Never expected_expiration."""
+    del expected_expiration  # never a settle-lock
+    plan = _aware(close_time) + timedelta(seconds=recycle_seconds)
+    if settlement_ts is None:
+        return plan
+    return max(plan, _aware(settlement_ts))
+
+
 def recycle_ready(
     close_time: datetime,
     recycle_seconds: int,
     now: datetime | None = None,
     *,
     expected_expiration: datetime | None = None,
+    settlement_ts: datetime | None = None,
 ) -> bool:
     """True when paper capital may recycle. Ignores expected_expiration."""
-    del expected_expiration  # never a settle-lock
-    return seconds_since_close(close_time, now) >= recycle_seconds
+    free = capital_free_at(
+        close_time,
+        recycle_seconds,
+        settlement_ts=settlement_ts,
+        expected_expiration=expected_expiration,
+    )
+    return _now(now) >= free
 
 
 def classify_kill(reason: str) -> str:

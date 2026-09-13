@@ -2,6 +2,16 @@ export type SparkPoint = { t: number; mid: number; spread: number };
 
 export type Tone = "green" | "amber" | "red";
 
+export type CfbBlock = {
+  index_id: string | null;
+  avg_60s: number | null;
+  qtr_avg: number | null;
+  live: number | null;
+  lag_ms: number | null;
+  oracle: boolean;
+  label: string;
+};
+
 export type WindowCard = {
   ticker: string;
   event: string;
@@ -11,10 +21,14 @@ export type WindowCard = {
   open: string | null;
   close: string | null;
   settlement_ts?: string | null;
+  capital_free_at?: string | null;
   expected_expiration?: string | null;
   seconds_to_close: number;
+  ttc?: number;
+  ttc_zone?: "GREEN" | "AMBER" | "RED";
   seconds_since_close?: number;
   last_60s: boolean;
+  last60s_lock?: boolean;
   new_risk_allowed?: boolean;
   gate_violation?: boolean;
   live: boolean;
@@ -22,8 +36,17 @@ export type WindowCard = {
   yes_ask: number | null;
   no_bid: number | null;
   no_ask: number | null;
+  yes_bid_sz?: number | null;
+  no_bid_sz?: number | null;
+  yes_ask_sz?: number | null;
+  no_ask_sz?: number | null;
+  bid_sum?: number | null;
+  ask_sum?: number | null;
+  arb?: boolean;
   mid: number | null;
   spread: number | null;
+  floor_strike?: number | null;
+  cfb?: CfbBlock;
   spark: SparkPoint[];
 };
 
@@ -68,6 +91,8 @@ export type HudSnapshot = {
     state: "ARMED" | "TRIPPED";
     reason: string;
     code: string;
+    strobe?: boolean;
+    unpaired_abort?: boolean;
   };
   risk: {
     bankroll: number;
@@ -86,6 +111,7 @@ export type HudSnapshot = {
     onesided_tone: Tone;
     abort_unpaired: boolean;
     daily_pnl: number;
+    day_pnl_net?: number;
     daily_kill: number;
     unsettled_pnl: number;
     unsettled_until: string;
@@ -98,13 +124,15 @@ export type HudSnapshot = {
   };
   fees: {
     today: number;
-    maker: number;
+    maker: number | null;
     taker: number;
     maker_pending_confirm: boolean;
     note: string;
   };
   gate: {
     last_seconds: number;
+    last60s_lock?: boolean;
+    no_new_risk?: boolean;
     new_risk_allowed: boolean;
     violation: boolean;
     windows: {
@@ -127,6 +155,7 @@ export type HudSnapshot = {
       series: string;
       close: string | null;
       settlement_ts: string | null;
+      capital_free_at?: string | null;
       expected_expiration: string | null;
       expected_expiration_is_lock: boolean;
       result: string | null;
@@ -161,6 +190,7 @@ export type HudSnapshot = {
     unrealized: number;
     fees: number;
     daily: number;
+    day_pnl_net?: number;
     fill_count: number;
     order_count: number;
     fill_rate: number;

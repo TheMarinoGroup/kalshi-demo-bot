@@ -80,6 +80,14 @@ def _parse_result(raw: JsonDict) -> Outcome | None:
     return None
 
 
+def _parse_strike(raw: JsonDict) -> Decimal | None:
+    for key in ("floor_strike", "strike_price", "strike"):
+        value = raw.get(key)
+        if value not in (None, ""):
+            return D(value)
+    return None
+
+
 def market_from_api(
     raw: JsonDict, series_ticker: str, series: SeriesMeta | None = None
 ) -> MarketWindow:
@@ -101,6 +109,7 @@ def market_from_api(
         ),
         settlement_ts=_parse_dt_opt(raw.get("settlement_ts") or raw.get("settled_time")),
         result=_parse_result(raw),
+        floor_strike=_parse_strike(raw),
     )
 
 
@@ -452,6 +461,13 @@ class MockKalshiClient:
                 close_time=now + timedelta(minutes=10),
                 fee_type="quadratic",
                 fee_multiplier=Decimal("1"),
+                floor_strike=(
+                    Decimal("65000")
+                    if "BTC" in series
+                    else Decimal("3500")
+                    if "ETH" in series
+                    else None
+                ),
             )
         self._books: dict[str, JsonDict] = {
             m.ticker: {

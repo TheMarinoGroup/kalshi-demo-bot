@@ -69,6 +69,7 @@ class PaperBot:
         self._last_wipe = 0
         self.mid_history = MidHistory()
         self.hud_hub = None
+        self.cfb: dict[str, object] = {}
 
     def stop(self) -> None:
         self._stop.set()
@@ -198,6 +199,8 @@ class PaperBot:
             log.info("ws_lifecycle" if kind == "market_lifecycle_v2" else "ws_ticker", type=kind)
         elif kind in {"cfbenchmarks_value", "cfbenchmarks_value_5hz"}:
             tick = parse_cfb_tick(message)
+            if tick:
+                self.cfb[tick.index_id] = tick
             if tick and self.tape:
                 self.tape.write(
                     "cfb",

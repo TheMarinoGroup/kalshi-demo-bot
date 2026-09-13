@@ -304,7 +304,13 @@ class MarketUniverse:
         return [
             m
             for m in self.settling.values()
-            if recycle_ready(m.close_time, delay, now, expected_expiration=m.expected_expiration)
+            if recycle_ready(
+                m.close_time,
+                delay,
+                now,
+                expected_expiration=m.expected_expiration,
+                settlement_ts=m.settlement_ts,
+            )
         ]
 
     def mark_recycled(self, ticker: str) -> MarketWindow | None:

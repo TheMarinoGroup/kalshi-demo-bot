@@ -84,6 +84,7 @@ class MarketWindow:
     expected_expiration: datetime | None = None
     settlement_ts: datetime | None = None
     result: Outcome | None = None
+    floor_strike: Decimal | None = None
 
     @property
     def window_id(self) -> str:
@@ -137,6 +138,26 @@ class OrderBook:
             if lvl.price == price:
                 return lvl.size
         return Decimal("0")
+
+    def best_yes_bid_size(self) -> Decimal | None:
+        return self.yes_bids[-1].size if self.yes_bids else None
+
+    def best_no_bid_size(self) -> Decimal | None:
+        return self.no_bids[-1].size if self.no_bids else None
+
+    def bid_sum(self) -> Decimal | None:
+        yes = self.best_yes_bid()
+        no = self.best_no_bid()
+        if yes is None or no is None:
+            return None
+        return yes + no
+
+    def ask_sum(self) -> Decimal | None:
+        yes = self.implied_yes_ask()
+        no = self.implied_no_ask()
+        if yes is None or no is None:
+            return None
+        return yes + no
 
     def tob(self) -> TopOfBook:
         return TopOfBook(

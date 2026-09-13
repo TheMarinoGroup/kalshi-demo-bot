@@ -186,6 +186,47 @@ body {
   animation: pulse 0.8s ease-in-out infinite;
 }
 
+.norisk {
+  background: #5a3a00;
+  color: var(--amber-2);
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.16em;
+  padding: 6px 16px;
+  text-align: center;
+  animation: strobe-amber 0.9s ease-in-out infinite;
+}
+
+.abort-strobe {
+  background: #3a2a00;
+  color: var(--amber-2);
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  padding: 6px 16px;
+  text-align: center;
+  animation: strobe-amber 0.7s ease-in-out infinite;
+}
+
+.killbar.strobe,
+.panel.strobe {
+  animation: strobe-red 0.55s ease-in-out infinite;
+}
+
+@keyframes strobe-red {
+  50% {
+    filter: brightness(1.35);
+    box-shadow: inset 0 0 18px rgba(255, 45, 85, 0.45);
+  }
+}
+
+@keyframes strobe-amber {
+  50% {
+    filter: brightness(1.25);
+    box-shadow: inset 0 0 16px rgba(245, 166, 35, 0.35);
+  }
+}
+
 .killbar,
 .hardstop {
   background: var(--kill);
@@ -573,6 +614,52 @@ h2,
 
 .clock.warn strong {
   color: var(--amber-2);
+}
+
+.clock.zone-green strong,
+.win.zone-green .win-series {
+  color: var(--ok);
+}
+
+.clock.zone-amber strong {
+  color: var(--amber-2);
+}
+
+.clock.zone-red strong {
+  color: var(--down);
+}
+
+.win.zone-amber {
+  border-color: #7a5a14;
+}
+
+.win.zone-red {
+  border-color: #7a1f35;
+}
+
+.book em {
+  display: block;
+  font-style: normal;
+  font-size: 10px;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+
+.tob-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text);
+  margin: 4px 0 6px;
+}
+
+.spark-note {
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-bottom: 4px;
 }
 
 .book {

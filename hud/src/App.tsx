@@ -100,12 +100,18 @@ function Meter({
   );
 }
 
+function dash(n: number | null | undefined, digits = 2): string {
+  if (n == null || Number.isNaN(n)) return "—";
+  return n.toFixed(digits);
+}
+
 function UtilChip({ cell }: { cell: UtilCell }) {
+  const count = cell.label.includes("window");
   return (
     <div className={cls("util-chip", cell.tone)}>
       <span>{cell.label.toUpperCase()}</span>
       <b>
-        {cell.label === "windows"
+        {count
           ? `${cell.value} / ${cell.max}`
           : `${money(cell.value, cell.max >= 10 ? 0 : 2)} / ${money(cell.max, 0)}`}
       </b>
@@ -118,15 +124,25 @@ function UtilChip({ cell }: { cell: UtilCell }) {
 
 function WindowPanel({ win }: { win: WindowCard }) {
   const gateBad = win.gate_violation || (win.last_60s && win.new_risk_allowed);
+  const zone = (win.ttc_zone ?? (win.last_60s ? "RED" : "GREEN")).toLowerCase();
+  const cfb = win.cfb;
   return (
-    <article className={cls("win", win.last_60s && "toxic", gateBad && "breach", !win.live && "next")}>
+    <article
+      className={cls(
+        "win",
+        `zone-${zone}`,
+        win.last_60s && "toxic",
+        gateBad && "breach",
+        !win.live && "next",
+      )}
+    >
       <header>
         <div>
           <div className="win-series">{win.series}</div>
           <div className="win-ticker">{win.ticker}</div>
         </div>
-        <div className={cls("clock", win.last_60s && "warn", gateBad && "breach")}>
-          <span>{win.live ? "TO CLOSE" : "OPENS"}</span>
+        <div className={cls("clock", `zone-${zone}`, win.last_60s && "warn", gateBad && "breach")}>
+          <span>TTC · {win.ttc_zone ?? "—"}</span>
           <strong>{countdown(win.seconds_to_close)}</strong>
         </div>
       </header>
@@ -134,39 +150,59 @@ function WindowPanel({ win }: { win: WindowCard }) {
         <div>
           <label>YES BID</label>
           <b className="up">{px(win.yes_bid)}</b>
+          <em>×{dash(win.yes_bid_sz, 0)}</em>
         </div>
         <div>
           <label>YES ASK</label>
           <b className="down">{px(win.yes_ask)}</b>
+          <em>×{dash(win.yes_ask_sz, 0)}</em>
         </div>
         <div>
           <label>NO BID</label>
           <b className="up">{px(win.no_bid)}</b>
+          <em>×{dash(win.no_bid_sz, 0)}</em>
         </div>
         <div>
           <label>NO ASK</label>
           <b className="down">{px(win.no_ask)}</b>
-        </div>
-        <div>
-          <label>MID</label>
-          <b className="cyan">{px(win.mid)}</b>
+          <em>×{dash(win.no_ask_sz, 0)}</em>
         </div>
         <div>
           <label>SPR</label>
           <b>{px(win.spread)}</b>
         </div>
+        <div>
+          <label>BID Σ / ASK Σ</label>
+          <b className={win.arb ? "up" : "cyan"}>
+            {px(win.bid_sum)} / {px(win.ask_sum)}
+          </b>
+        </div>
+      </div>
+      <div className="tob-meta">
+        <span className={cls("pill", win.arb ? "ok" : "muted")}>{win.arb ? "ARB" : "NO ARB"}</span>
+        <span>
+          FLOOR {win.floor_strike != null ? win.floor_strike.toLocaleString() : "—"}
+        </span>
+        <span>
+          CFB {cfb?.index_id ?? "—"} avg60 {dash(cfb?.avg_60s, 1)} qtr {dash(cfb?.qtr_avg, 1)}
+        </span>
+        <span className="muted">
+          live {dash(cfb?.live, 1)} · lag {dash(cfb?.lag_ms, 0)} · {cfb?.label ?? "chart≠settle"}
+        </span>
       </div>
       <Spark points={win.spark} />
+      <div className="spark-note">chart ≠ settle · CFB avg60/qtr is the oracle, not live_data/spot</div>
       <footer>
         {win.gate_violation ? (
           <span className="pill breach">LAST 60s VIOLATION</span>
-        ) : win.last_60s ? (
+        ) : win.last60s_lock || win.last_60s ? (
           <span className="pill warn">LAST 60s — NO NEW RISK</span>
         ) : (
           <span className="pill ok">NEW RISK ALLOWED</span>
         )}
         <span className="muted">
           {win.open?.slice(11, 19)} → {win.close?.slice(11, 19)} UTC
+          {win.capital_free_at ? ` · free ${win.capital_free_at.slice(11, 19)}` : ""}
         </span>
       </footer>
     </article>
@@ -236,21 +272,21 @@ function RiskDesk({
       </div>
 
       <Meter
-        label="4 · OPEN NOTIONAL"
+        label="4 · UTIL_OPEN"
         value={risk.open_notional}
         max={risk.max_open}
         tone={risk.open_tone}
         note={risk.open_notional >= risk.max_open ? `≥ ${money(risk.max_open, 0)} KILL` : undefined}
       />
       <Meter
-        label="5 · WINDOWS IN FLIGHT"
+        label="5 · UTIL_WINDOWS"
         value={risk.windows}
         max={risk.max_windows}
         format="count"
         tone={snap.util.windows.tone}
       />
       <Meter
-        label="6 · ONE-SIDED / INCOMPLETE"
+        label="6 · UTIL_ONESIDED"
         value={risk.unpaired}
         max={risk.max_onesided}
         tone={risk.onesided_tone}
@@ -261,11 +297,11 @@ function RiskDesk({
         }
       />
       <Meter
-        label="7 · DAILY PNL vs KILL"
+        label="7 · DAY_PNL_NET vs −KILL"
         value={Math.max(0, -risk.daily_pnl)}
         max={risk.daily_kill}
         tone={snap.util.daily_loss.tone}
-        note={`day ${money(pnl.daily)} incl. unsettled ${money(risk.unsettled_pnl)} until ${risk.unsettled_until}`}
+        note={`net ${money(risk.day_pnl_net ?? pnl.daily)} incl. unsettled ${money(risk.unsettled_pnl)} until ${risk.unsettled_until}`}
       />
 
       <div className="panel">
@@ -281,7 +317,7 @@ function RiskDesk({
           </div>
           <div>
             <span>MAKER</span>
-            <b>{money(fees.maker, 4)}</b>
+            <b className="warn">{fees.maker == null ? "—" : money(fees.maker, 4)}</b>
           </div>
           <div>
             <span>CONFIRM</span>
@@ -323,8 +359,8 @@ function RiskDesk({
       <div className="panel">
         <label>10 · SETTLE BUFFER / UNLOCK</label>
         <div className="panel-note">
-          Free on <b>settlement_ts</b> · plan {band[0]}–{band[1]}s (now {settle.recycle_s}s) ·{" "}
-          <em>NOT expected_expiration +5m</em>
+          <b>capital_free_at</b> = max(settlement_ts, close+{band[0]}–{band[1]}s) · recycle{" "}
+          {settle.recycle_s}s · <em>NOT expected_expiration</em>
         </div>
         <ul className="gate-list">
           {settle.buffers.length ? (
@@ -334,7 +370,7 @@ function RiskDesk({
                 <span>
                   {b.unlocked ? "FREE" : `T-${countdown(Math.max(0, b.seconds_to_unlock))}`}
                 </span>
-                <span>{b.settlement_ts ? "TS" : "WAIT TS"}</span>
+                <span>{(b.capital_free_at ?? b.settlement_ts)?.slice(11, 19) ?? "WAIT TS"}</span>
               </li>
             ))
           ) : (
@@ -343,7 +379,7 @@ function RiskDesk({
         </ul>
       </div>
 
-      <div className={cls("panel kill-panel", kill.active && "tripped")}>
+      <div className={cls("panel kill-panel", kill.active && "tripped", kill.strobe && "strobe")}>
         <label>11 · KILL SWITCH</label>
         <div className="kill-row">
           <div className={cls("kill-state", kill.active ? "tripped" : "armed")}>
@@ -451,8 +487,14 @@ function Desk({
       {mode.hard_stop ? (
         <div className="hardstop">HARD STOP · LIVE WITHOUT APPROVAL · PAPER ONLY</div>
       ) : null}
+      {snap.gate.last60s_lock ? (
+        <div className="norisk">NO NEW RISK · LAST-60s LOCK · FLATTEN / CANCEL ONLY</div>
+      ) : null}
+      {kill.unpaired_abort && !kill.active ? (
+        <div className="abort-strobe">UNPAIRED ABORT · {risk.onesided_leg?.toUpperCase()} {risk.onesided_ticker ?? ""}</div>
+      ) : null}
       {kill.active ? (
-        <div className="killbar">
+        <div className="killbar strobe">
           KILL SWITCH TRIPPED · {(kill.code || "latch").toUpperCase()} · {kill.reason || "ARMED"}
         </div>
       ) : null}
@@ -574,8 +616,8 @@ function Desk({
             <b className={pnlClass(pnl.unrealized)}>{money(pnl.unrealized)}</b>
           </div>
           <div>
-            <label>SESSION</label>
-            <b className={pnlClass(pnl.daily)}>{money(pnl.daily)}</b>
+            <label>DAY_PNL_NET</label>
+            <b className={pnlClass(pnl.day_pnl_net ?? pnl.daily)}>{money(pnl.day_pnl_net ?? pnl.daily)}</b>
           </div>
           <div>
             <label>FILLS</label>

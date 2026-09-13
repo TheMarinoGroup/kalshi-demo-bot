@@ -7,16 +7,18 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from kalshi_pbot.config import CLIP_MAX, CLIP_MIN, SETTLE_RECYCLE_BAND, Settings
+from kalshi_pbot.config import CFB_INDEX, CLIP_MAX, CLIP_MIN, SETTLE_RECYCLE_BAND, Settings
 from kalshi_pbot.metrics import compute_metrics
 from kalshi_pbot.risk_engine import (
+    capital_free_at,
     classify_kill,
     in_last_seconds,
     recycle_ready,
     seconds_since_close,
     seconds_to_close,
+    ttc_zone,
 )
-from kalshi_pbot.types import Fill, MarketWindow, OrderBook, PortfolioSnapshot
+from kalshi_pbot.types import CFBTick, Fill, MarketWindow, OrderBook, PortfolioSnapshot
 
 HISTORY_LEN = 180
 
@@ -132,17 +134,62 @@ def _mix(port: PortfolioSnapshot) -> dict[str, float]:
     return mix
 
 
+def _cfb_block(bot: Any, series: str) -> dict[str, Any]:
+    ticks: dict[str, CFBTick] = getattr(bot, "cfb", {}) or {}
+    index_id = CFB_INDEX.get(series)
+    tick = ticks.get(index_id) if index_id else None
+    return {
+        "index_id": index_id,
+        "avg_60s": _f(tick.avg_60s) if tick and tick.avg_60s is not None else None,
+        "qtr_avg": _f(tick.settle_avg) if tick and tick.settle_avg is not None else None,
+        "live": _f(tick.value) if tick else None,
+        "lag_ms": None,  # unmeasured — HUD shows "—"
+        "oracle": False,
+        "label": "chart≠settle",
+    }
+
+
+def _book_depth(book: OrderBook | None, min_edge: Decimal) -> dict[str, Any]:
+    if book is None:
+        return {
+            "yes_bid_sz": None,
+            "no_bid_sz": None,
+            "yes_ask_sz": None,
+            "no_ask_sz": None,
+            "bid_sum": None,
+            "ask_sum": None,
+            "arb": False,
+        }
+    bid_sum = book.bid_sum()
+    return {
+        "yes_bid_sz": _f(book.best_yes_bid_size()),
+        "no_bid_sz": _f(book.best_no_bid_size()),
+        "yes_ask_sz": _f(book.best_no_bid_size()),  # implied ask size = opposite bid
+        "no_ask_sz": _f(book.best_yes_bid_size()),
+        "bid_sum": _f(bid_sum),
+        "ask_sum": _f(book.ask_sum()),
+        "arb": bool(bid_sum is not None and bid_sum < Decimal("1") - min_edge),
+    }
+
+
 def _settle_row(
     market: MarketWindow, settings: Settings, now: datetime, locked: Decimal
 ) -> dict[str, Any]:
     recycle_s = settings.effective_settle_recycle_seconds
     since = seconds_since_close(market.close_time, now)
-    to_unlock = recycle_s - since
+    free_at = capital_free_at(
+        market.close_time,
+        recycle_s,
+        settlement_ts=market.settlement_ts,
+        expected_expiration=market.expected_expiration,
+    )
+    to_unlock = (free_at - now).total_seconds()
     unlocked = recycle_ready(
         market.close_time,
         recycle_s,
         now,
         expected_expiration=market.expected_expiration,
+        settlement_ts=market.settlement_ts,
     ) and market.result is not None
     to_settlement = None
     if market.settlement_ts is not None:
@@ -157,6 +204,7 @@ def _settle_row(
         "series": market.series_ticker,
         "close": _iso(market.close_time),
         "settlement_ts": _iso(market.settlement_ts),
+        "capital_free_at": _iso(free_at),
         "expected_expiration": _iso(market.expected_expiration),
         "expected_expiration_is_lock": False,
         "result": market.result.value if market.result else None,
@@ -165,7 +213,7 @@ def _settle_row(
         "seconds_to_unlock": to_unlock,
         "seconds_to_settlement_ts": to_settlement,
         "unlocked": unlocked,
-        "free_on": "settlement_ts",
+        "free_on": "max(settlement_ts, close+recycle)",
         "locked_notional": _f(locked),
     }
 
@@ -221,6 +269,14 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
             any_last_60 = True
         if violation:
             any_violation = True
+        depth = _book_depth(book, settings.min_edge)
+        free_at = capital_free_at(
+            market.close_time,
+            settings.effective_settle_recycle_seconds,
+            settlement_ts=market.settlement_ts,
+            expected_expiration=market.expected_expiration,
+        )
+        zone = ttc_zone(to_close)
         windows.append(
             {
                 "ticker": market.ticker,
@@ -231,10 +287,14 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
                 "open": _iso(market.open_time),
                 "close": _iso(market.close_time),
                 "settlement_ts": _iso(market.settlement_ts),
+                "capital_free_at": _iso(free_at),
                 "expected_expiration": _iso(market.expected_expiration),
                 "seconds_to_close": to_close,
+                "ttc": to_close,
+                "ttc_zone": zone,
                 "seconds_since_close": seconds_since_close(market.close_time, now),
                 "last_60s": last_60,
+                "last60s_lock": last_60,
                 "new_risk_allowed": new_risk,
                 "gate_violation": violation,
                 "live": live,
@@ -242,8 +302,17 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
                 "yes_ask": _f(tob.yes_ask) if tob else None,
                 "no_bid": _f(tob.no_bid) if tob else None,
                 "no_ask": _f(tob.no_ask) if tob else None,
-                "mid": _f(tob.mid_yes) if tob else None,
+                "yes_bid_sz": depth["yes_bid_sz"],
+                "no_bid_sz": depth["no_bid_sz"],
+                "yes_ask_sz": depth["yes_ask_sz"],
+                "no_ask_sz": depth["no_ask_sz"],
+                "bid_sum": depth["bid_sum"],
+                "ask_sum": depth["ask_sum"],
+                "arb": depth["arb"],
                 "spread": _f(tob.spread_yes) if tob else None,
+                "mid": _f(tob.mid_yes) if tob else None,
+                "floor_strike": _f(market.floor_strike),
+                "cfb": _cfb_block(bot, market.series_ticker),
                 "spark": history.series(market.ticker),
             }
         )
@@ -253,7 +322,9 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
                     "ticker": market.ticker,
                     "series": market.series_ticker,
                     "seconds_to_close": to_close,
+                    "ttc_zone": zone,
                     "last_60s": last_60,
+                    "last60s_lock": last_60,
                     "new_risk_allowed": new_risk,
                     "violation": violation,
                 }
@@ -288,28 +359,28 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
             "tone": _tone(fill_util, kill=fill_breach),
         },
         "open": {
-            "label": "open",
+            "label": "util_open",
             "value": _f(port.open_notional),
             "max": _f(settings.max_open_notional),
             "util": open_util,
             "tone": _tone(open_util, kill=open_breach or kill_code == "open"),
         },
         "windows": {
-            "label": "windows",
+            "label": "util_windows",
             "value": float(len(port.window_ids)),
             "max": float(settings.max_windows),
             "util": windows_util,
             "tone": _tone(windows_util),
         },
         "onesided": {
-            "label": "one-sided",
+            "label": "util_onesided",
             "value": _f(port.unpaired_notional),
             "max": _f(settings.max_onesided),
             "util": onesided_util,
             "tone": _tone(onesided_util, kill=onesided_breach or kill_code == "one-sided"),
         },
         "daily_loss": {
-            "label": "daily loss",
+            "label": "day_pnl_net",
             "value": _f(loss),
             "max": _f(settings.daily_loss_limit),
             "util": daily_util,
@@ -367,7 +438,7 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
 
     band = list(SETTLE_RECYCLE_BAND)
     return {
-        "v": 2,
+        "v": 3,
         "ts": _iso(now),
         "mode": _mode_block(settings),
         "kill": {
@@ -375,6 +446,8 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
             "state": "TRIPPED" if kill_active else "ARMED",
             "reason": kill_reason,
             "code": kill_code,
+            "strobe": kill_active or bool(port.unpaired_notional > 0),
+            "unpaired_abort": bool(port.unpaired_notional > 0),
         },
         "risk": {
             "bankroll": _f(settings.bankroll),
@@ -393,6 +466,7 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
             "onesided_tone": util["onesided"]["tone"],
             "abort_unpaired": bool(port.unpaired_notional > 0),
             "daily_pnl": _f(port.daily_pnl),
+            "day_pnl_net": _f(port.daily_pnl),
             "daily_kill": _f(settings.daily_loss_limit),
             "unsettled_pnl": _f(port.unrealized_pnl),
             "unsettled_until": "settlement_ts",
@@ -405,19 +479,21 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
         },
         "fees": {
             "today": _f(bot.portfolio.fees),
-            "maker": _f(bot.portfolio.maker_fees),
+            "maker": None,  # unmeasured — HUD shows "—" until demo confirm
             "taker": _f(bot.portfolio.taker_fees),
             "maker_pending_confirm": True,
-            "note": "maker $0 pending demo-fill confirm",
+            "note": "maker fee — until measured / demo-fill confirm",
         },
         "gate": {
             "last_seconds": settings.last_seconds,
+            "last60s_lock": any_last_60,
+            "no_new_risk": any_last_60 or kill_active,
             "new_risk_allowed": new_risk_allowed,
             "violation": any_violation,
             "windows": gate_rows,
         },
         "settle": {
-            "lock": "settlement_ts",
+            "lock": "max(settlement_ts, close+recycle)",
             "not_expected_expiration": True,
             "plan_s": band,
             "recycle_s": settings.effective_settle_recycle_seconds,
@@ -440,6 +516,7 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
             "unrealized": _f(metrics.unrealized_pnl),
             "fees": _f(metrics.fees),
             "daily": _f(metrics.daily_pnl),
+            "day_pnl_net": _f(metrics.daily_pnl),
             "fill_count": metrics.fill_count,
             "order_count": metrics.order_count,
             "fill_rate": _f(metrics.fill_rate),

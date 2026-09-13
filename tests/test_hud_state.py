@@ -59,13 +59,29 @@ def test_snapshot_must_show_panels_from_mock_bot() -> None:
     assert snap["risk"]["unsettled_until"] == "settlement_ts"
     assert snap["risk"]["settle_band"] == [60, 90]
     assert snap["fees"]["maker_pending_confirm"] is True
-    assert snap["settle"]["lock"] == "settlement_ts"
+    assert snap["fees"]["maker"] is None
     assert snap["settle"]["not_expected_expiration"] is True
     assert snap["kill"]["state"] == "ARMED"
     assert snap["kill"]["active"] is False
     assert set(snap["util"]) == {"fill", "open", "windows", "onesided", "daily_loss"}
+    assert snap["util"]["open"]["label"] == "util_open"
+    assert snap["util"]["onesided"]["label"] == "util_onesided"
+    assert snap["util"]["windows"]["label"] == "util_windows"
     assert "max_daily_notional" not in snap
     assert "max_daily_notional" not in snap["risk"]
+    live = [w for w in snap["windows"] if w["live"]]
+    assert live
+    win = live[0]
+    assert win["ttc_zone"] in {"GREEN", "AMBER", "RED"}
+    assert win["floor_strike"] == 65000
+    assert win["bid_sum"] == 0.97  # 0.48 + 0.49
+    assert win["ask_sum"] == 1.03
+    assert win["arb"] is True
+    assert win["yes_bid_sz"] == 40
+    assert win["cfb"]["lag_ms"] is None
+    assert win["cfb"]["oracle"] is False
+    assert win["cfb"]["label"] == "chart≠settle"
+    assert win["capital_free_at"]
     assert all(w["series"].endswith("15M") or "H" in w["series"] for w in snap["windows"])
 
 
@@ -109,7 +125,7 @@ def test_last_fill_clip_and_fee_split(settings: Settings) -> None:
     snap = build_snapshot(bot, MidHistory())
     assert snap["risk"]["last_fill"]["notional"] == 4.0
     assert snap["risk"]["last_fill"]["liquidity"] == "taker"
-    assert snap["fees"]["maker"] == 0.0
+    assert snap["fees"]["maker"] is None
     assert snap["fees"]["taker"] == 0.0175
     assert snap["fees"]["today"] == 0.0175
     assert snap["util"]["fill"]["value"] == 4.0
@@ -173,6 +189,9 @@ def test_last_60s_gate_and_violation(settings: Settings, now: datetime) -> None:
     assert gate["new_risk_allowed"] is False
     assert snap["gate"]["new_risk_allowed"] is False
     assert snap["gate"]["violation"] is False
+    assert snap["gate"]["last60s_lock"] is True
+    assert snap["gate"]["no_new_risk"] is True
+    assert snap["gate"]["windows"][0]["ttc_zone"] == "RED"
 
     bot.portfolio.upsert_resting(
         RestingOrder(
@@ -212,8 +231,17 @@ def test_settle_buffer_ignores_expected_expiration(settings: Settings, now: date
     assert buf["expected_expiration_is_lock"] is False
     assert buf["unlocked"] is False
     assert 64 <= buf["seconds_to_unlock"] <= 66
-    assert buf["free_on"] == "settlement_ts"
+    assert buf["capital_free_at"]
     assert snap["settle"]["not_expected_expiration"] is True
+    from kalshi_pbot.risk_engine import capital_free_at
+
+    free = capital_free_at(
+        market.close_time,
+        75,
+        settlement_ts=market.settlement_ts,
+        expected_expiration=market.expected_expiration,
+    )
+    assert (free - market.close_time).total_seconds() == 75
 
 
 def test_kill_codes_and_manual_endpoint(settings: Settings) -> None:

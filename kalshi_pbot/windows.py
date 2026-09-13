@@ -35,6 +35,7 @@ def window_to_dict(window: MarketWindow) -> dict[str, object]:
         ),
         "settlement_ts": _iso(window.settlement_ts) if window.settlement_ts else None,
         "result": window.result.value if window.result else "",
+        "floor_strike": str(window.floor_strike) if window.floor_strike is not None else None,
     }
 
 
@@ -54,6 +55,7 @@ def window_from_dict(raw: dict[str, object]) -> MarketWindow:
         expected_expiration=_parse_opt(raw.get("expected_expiration")),
         settlement_ts=_parse_opt(raw.get("settlement_ts")),
         result=_result(raw.get("result")),
+        floor_strike=D(raw["floor_strike"]) if raw.get("floor_strike") not in (None, "") else None,
     )
 
 

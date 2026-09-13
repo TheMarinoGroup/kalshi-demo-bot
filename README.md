@@ -243,6 +243,16 @@ cd hud && npm install && npm run dev   # Vite on :5173, proxies to :8080
 
 The desk is wired to live bot/paper state. Risk Desk MUST-SHOW panels:
 
+Prioritized Dig #4 fields on each live 15m card: **TTC zone** GREEN/AMBER/RED
+(>180 / 180–60 / ≤60), **NO NEW RISK** banner on `last60s_lock`, TOB with
+sizes + `bid_sum`/`ask_sum` + arb flag, `util_open` $/$50, `util_onesided`
+$/$30, `util_windows` n/2, `day_pnl_net` vs −$20 (incl. unsettled),
+`settlement_ts` + `capital_free_at = max(settlement_ts, close+60–90s)`
+(**not** `expected_expiration`), `floor_strike` + CFB avg60/qtr_avg with
+**chart≠settle** (live spot is not the oracle), fee drag + paper tape,
+unpaired-abort / kill strobe. CFB lag and maker fee show **—** until
+measured.
+
 1. Mode badge — **PAPER** only (LIVE without approval = hard-stop visual)
 2. Bankroll — config-driven (`KALSHI_BANKROLL`, default $1,000)
 3. Clip / last fill — $10–$30 band (default $20)
