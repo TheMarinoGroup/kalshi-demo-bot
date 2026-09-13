@@ -237,7 +237,7 @@ kalshi-pbot hud --mock
 kalshi-pbot run --dry-run --hud
 ```
 
-On Windows, `start-hud.bat` cds to the repo and runs `python -m kalshi_pbot hud`.
+On Windows, `start-hud.bat` cds to the repo, opens the desk in a browser after ~4s, and runs `python -m kalshi_pbot hud`.
 
 Open **http://127.0.0.1:8080**. Frontend is Vite + React, served by the
 bot's FastAPI process (`/api/snapshot`, `/ws`). For UI hot-reload:

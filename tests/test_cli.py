@@ -11,6 +11,8 @@ def test_start_hud_bat_is_ascii_launcher() -> None:
     assert "python -m kalshi_pbot hud" in text
     assert "http://127.0.0.1:8080" in text
     assert "Ctrl+C" in text
+    assert "timeout /t 4 /nobreak" in text
+    assert text.index("start \"\" cmd /c") < text.index("python -m kalshi_pbot hud")
 
 
 def test_python_module_cli_help() -> None:
