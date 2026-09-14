@@ -723,11 +723,4 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
         "size": hitl_state["size"],
         "allow_production": hitl_state["allow_production"],
         "hitl_timeout_s": hitl_state.get("hitl_timeout_s", 60),
-        # Paper HUD Approve buttons. Never echo on --demo-submit (LAN /v0/state
-        # already omits this; snapshot must not leak DESK_TOKEN either).
-        "desk_token": (
-            ""
-            if getattr(settings, "live_submit", False)
-            else str(getattr(settings, "desk_token", "") or "")
-        ),
     }

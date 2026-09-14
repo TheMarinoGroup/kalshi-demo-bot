@@ -319,5 +319,4 @@ export type HudSnapshot = {
   };
   allow_production?: boolean;
   hitl_timeout_s?: number;
-  desk_token?: string;
 };

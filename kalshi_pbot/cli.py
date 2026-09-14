@@ -131,7 +131,7 @@ def hud(
     ] = False,
     series: Annotated[str | None, typer.Option("--series")] = None,
     latency: Annotated[int, typer.Option("--latency")] = 150,
-    host: Annotated[str, typer.Option("--host")] = "0.0.0.0",
+    host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port")] = 8080,
 ) -> None:
     """Run the paper bot and open the desk HUD. Never POSTs orders."""

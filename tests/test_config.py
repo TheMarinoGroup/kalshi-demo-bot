@@ -43,6 +43,7 @@ def test_defaults_are_paper_data_plane() -> None:
     assert settings.kelly_max == Decimal("0.25")
     assert settings.desk_mode == "PAPER"
     assert settings.hitl_timeout_seconds == 60
+    assert settings.hud_host == "127.0.0.1"
     assert settings.cancel_orphans is False
     assert settings.kill_latch_path.endswith("kill-latch.json")
 

@@ -121,7 +121,7 @@ class Settings(BaseSettings):
     # Crypto Up/Down 15m+ only. 5-minute (and shorter) series are refused.
     min_window_minutes: int = MIN_WINDOW_MINUTES
     hud: bool = False
-    hud_host: str = "0.0.0.0"
+    hud_host: str = "127.0.0.1"
     hud_port: int = 8080
     clip_dollars: Decimal = DEFAULT_CLIP
     quote_mode: QuoteMode = "one_sided"

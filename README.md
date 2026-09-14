@@ -356,7 +356,9 @@ What used to live only in RAM (and still does, until reconcile runs): paper posi
 
 Defaults remain paper / dry-run. View-only / paper never POST production orders. This does **not** enable `KALSHI_ALLOW_PRODUCTION` or live submit. Risk Desk must re-check before any micro-live.
 
-Open **http://127.0.0.1:8080**. Frontend is Vite + React, served by the
+Open **http://127.0.0.1:8080**. The HUD listens on **127.0.0.1** by default
+(HITL session cookie stays off the LAN). Pass `--host 0.0.0.0` only when you
+intentionally expose the desk. Frontend is Vite + React, served by the
 bot's FastAPI process (`/api/snapshot`, `/ws`). For UI hot-reload:
 
 ```bash
@@ -390,7 +392,7 @@ measured.
 10. Settle buffer / unlock — free on `settlement_ts`; plan 60–90s (**not** `expected_expiration` +5m)
 11. Kill switch — ARMED / TRIPPED + reason (loss / open / one-sided / manual) + manual kill
 12. Compact limit strip — fill · open · windows · one-sided · daily loss
-13. HITL approvals — pending `entry` SizeIntents (ticker, side, clip, edge, kill headroom) with Approve / Deny → `POST /v0/hitl/{intent_id}` (requires `X-Desk-Token`; `--demo-submit` also needs operator `DESK_TOKEN`)
+13. HITL approvals — pending `entry` SizeIntents (ticker, side, clip, edge, kill headroom) with Approve / Deny → `POST /v0/hitl/{intent_id}` (HttpOnly `desk_token` cookie or `X-Desk-Token`; `--demo-submit` also needs operator `DESK_TOKEN`)
 14. Size / Family D — `scale_in` shows `blocked_by=LANE_MM` (no SCALE path)
 
 **HITL mode** (`DESK_MODE=HITL`): new-risk `entry` waits for human approve (default 60s timeout → `timeout_deny` / `HITL_BLOCK`). Reduce-only / flatten / soft-abort proceed without approval. **PAPER** keeps the auto paper-v2 path and an empty queue. Contracts: `schemas/v0/` (HITLDecision, DeskMode, SizeIntent.v0.1-mm, BusEvent). `allow_production` stays false.
@@ -417,7 +419,7 @@ startup reconcile (empty / positions / resting / fail-closed), and
 docker compose up --build
 ```
 
-Compose defaults to the **desk** (`kalshi-pbot hud`) on port **8080** —
+Compose defaults to the **desk** (`kalshi-pbot hud --host 0.0.0.0`) on port **8080** —
 paper-tape, public prod 15m books, no order POSTs. Mount `./secrets` for
 a demo key and `./data` for windows + tape.
 

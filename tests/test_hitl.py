@@ -214,7 +214,7 @@ def test_snapshot_must_show_hitl_and_size_on_paper_bot() -> None:
     assert snap["desk_mode"]["profile"] == "dig6_tight"
     assert snap["desk_mode"]["bankroll"] in {"500", "500.0", str(bot.settings.bankroll)}
     assert Path("schemas/v0/HITLDecision.json").is_file()
-    assert snap["desk_token"]
+    assert "desk_token" not in snap
 
 
 def test_hitl_post_requires_token() -> None:
@@ -226,6 +226,7 @@ def test_hitl_post_requires_token() -> None:
     client = TestClient(create_app(bot, HudHub(), MidHistory()))
     denied = client.post(f"/v0/hitl/{intent_id}", json={"decision": "approve"})
     assert denied.status_code == 401
+    assert "desk_token=" not in (denied.headers.get("set-cookie") or "").lower()
     assert not bot.execution.dry_run_orders
     ok = client.post(
         f"/v0/hitl/{intent_id}",
@@ -292,8 +293,10 @@ def test_hitl_demo_submit_refuses_without_operator_token() -> None:
     assert res.status_code == 403
     assert not bot.execution.dry_run_orders
     snap = build_snapshot(bot, MidHistory())
-    assert not snap.get("desk_token")
-    assert "desk_token" not in client.get("/v0/state").json()
+    assert "desk_token" not in snap
+    state = client.get("/v0/state")
+    assert "desk_token" not in state.json()
+    assert "desk_token=" not in (state.headers.get("set-cookie") or "").lower()
 
 
 def test_demo_submit_snapshot_hides_operator_token() -> None:
@@ -309,9 +312,54 @@ def test_demo_submit_snapshot_hides_operator_token() -> None:
     assert settings.desk_token_from_operator is True
     bot = PaperBot(settings)
     snap = build_snapshot(bot, MidHistory())
-    assert snap.get("desk_token") == ""
-    state = TestClient(create_app(bot, HudHub(), MidHistory())).get("/v0/state").json()
-    assert "desk_token" not in state
+    assert "desk_token" not in snap
+    client = TestClient(create_app(bot, HudHub(), MidHistory()))
+    state = client.get("/v0/state")
+    assert "desk_token" not in state.json()
+    assert "desk_token=" not in (state.headers.get("set-cookie") or "").lower()
+
+
+def test_hitl_cookie_from_snapshot_authorizes_without_header() -> None:
+    bot = _underround_bot(desk_mode="HITL")
+    bot.step()
+    intent_id = bot.hitl.pending_payloads()[0]["intent_id"]
+    client = TestClient(create_app(bot, HudHub(), MidHistory()))
+    snap = client.get("/api/snapshot")
+    assert snap.status_code == 200
+    body = snap.json()
+    assert "desk_token" not in body
+    cookie = snap.headers.get("set-cookie") or ""
+    assert "desk_token=" in cookie.lower()
+    assert "httponly" in cookie.lower()
+    res = client.post(f"/v0/hitl/{intent_id}", json={"decision": "deny"})
+    assert res.status_code == 200
+    assert res.json()["decision"] == "deny"
+
+
+def test_demo_submit_hud_cookie_approves_with_operator_token() -> None:
+    settings = Settings(
+        mock=True,
+        dry_run=False,
+        paper_tape=False,
+        series="KXBTC15M",
+        desk_mode="HITL",
+        desk_token="operator-secret-token",
+    )
+    bot = PaperBot(settings)
+    bot.universe.refresh()
+    bot.universe.hydrate_books(bot.books)
+    bot.step()
+    pending = bot.hitl.pending_payloads()
+    assert pending
+    client = TestClient(create_app(bot, HudHub(), MidHistory()))
+    snap = client.get("/api/snapshot")
+    assert "desk_token" not in snap.json()
+    res = client.post(
+        f"/v0/hitl/{pending[0]['intent_id']}",
+        json={"decision": "deny"},
+    )
+    assert res.status_code == 200
+    assert res.json()["decision"] == "deny"
 
 
 def test_approve_after_deadline_is_timeout_deny() -> None:
