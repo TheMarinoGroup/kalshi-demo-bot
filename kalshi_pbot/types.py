@@ -49,6 +49,7 @@ class RejectReason(StrEnum):
     UNPAIRED_EXISTS = "unpaired_exists"
     NOT_READY = "not_ready"
     INVALID = "invalid"
+    KELLY_CAP = "kelly_cap"
 
 
 QuoteMode = Literal["one_sided", "two_sided"]

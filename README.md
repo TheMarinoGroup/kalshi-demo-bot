@@ -92,7 +92,10 @@ kill ≤ clip.
 API accepts it, STP `taker_at_cross`. Quote **one side**
 (`KALSHI_QUOTE_MODE=one_sided`; do not switch to `two_sided` unless Risk
 later OK). After any fill, completing the other side is the only quote
-until the pair is done or unpaired is aborted.
+until the pair is done or unpaired is aborted. Idle ENTRY is gated by
+`KALSHI_ONLY_QUOTE_UNDERROUND=true`: quote only when
+`bid_sum ≤ 1 − min_edge` (0.96 at `min_edge=0.04`). Size intents are
+clipped/refused above `KALSHI_KELLY_MAX=0.25` of bankroll.
 
 Maker fee on these series is believed **$0** (`fee_type=quadratic`). The bot
 logs **fee drag** on every paper fill. Quadratic maker = $0 is **pending
@@ -136,7 +139,13 @@ exists, `MIN_EDGE=0.04` (`bid_sum ≤ 0.96`), `improve_ticks=0`,
 `taker_pair_arb=false`.
 
 These are now the code defaults (still dry-run / paper-tape; no
-production orders):
+production orders). Dig7: `min_edge=0.04` does **not** skip non-underround
+ENTRY unless `KALSHI_ONLY_QUOTE_UNDERROUND=true` (now the paper-v2-tight
+default). Idle ENTRY quotes only when `bid_sum ≤ 1 − min_edge` (0.96).
+After any fill, quotes stay complete-only until the pair is done or
+unpaired is aborted. Soft onesided abort is **strict >** $10. Kelly
+fraction is capped at 0.25 of bankroll. This soak is **MM lane** (no
+path-dependent / Family D scale).
 
 ```bash
 KALSHI_DRY_RUN=true
@@ -149,10 +158,12 @@ KALSHI_QUOTE_MODE=one_sided
 KALSHI_IMPROVE_TICKS=0
 KALSHI_TAKER_PAIR_ARB=false
 KALSHI_MIN_EDGE=0.04
+KALSHI_ONLY_QUOTE_UNDERROUND=true
 KALSHI_LAST_SECONDS=120
 KALSHI_MAX_UNPAIRED_AGE_SECONDS=45
 KALSHI_SOFT_ONESIDED=10
-KALSHI_ONLY_QUOTE_UNDERROUND=true
+KALSHI_KELLY_MAX=0.25
+# DESK_LANE=MM
 ```
 
 Soft knobs fire before the Option B hard caps ($25 / $15 / $10). Do not
@@ -208,8 +219,9 @@ CLI (kalshi-pbot) ── runner.PaperBot
 | `kalshi_pbot/paper_matcher.py` | Conservative local matcher + latency |
 | `kalshi_pbot/tape.py` | Append-only JSONL research tape (`v=1`) |
 | `kalshi_pbot/expectancy.py` | Tape replay hook for later 7×24h runs |
-| `kalshi_pbot/strategy/maker.py` | One-sided / controlled two-sided post-only quotes; unpaired complete / age abort |
+| `kalshi_pbot/strategy/maker.py` | One-sided / controlled two-sided post-only quotes; unpaired complete / age abort; Dig7 underround ENTRY gate |
 | `kalshi_pbot/strategy/pair_arb.py` | Maker–maker and optional taker–taker pairing |
+| `kalshi_pbot/kelly.py` | Kelly ≤ 0.25 size clamp (not a full Edge sizer) |
 | `kalshi_pbot/fees.py` | Quadratic taker / maker fee + `fee_drag` |
 | `kalshi_pbot/risk_engine.py` | Hard gates (last-60s, daily kill, caps) + soft unpaired-exists reject |
 | `kalshi_pbot/execution.py` | Paper register or `POST /portfolio/events/orders` |

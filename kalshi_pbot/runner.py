@@ -135,6 +135,7 @@ class PaperBot:
             quote_mode=self.settings.quote_mode,
             improve_ticks=self.settings.improve_ticks,
             only_quote_underround=self.settings.only_quote_underround,
+            kelly_max=str(self.settings.kelly_max),
             clip=str(self.settings.clip),
             settle_recycle_s=self.settings.effective_settle_recycle_seconds,
             settle_rare_tail=self.settings.settle_rare_tail,

@@ -101,7 +101,9 @@ def test_two_sided_emits_both_when_join_sum_below_one(settings: Settings, market
 def test_two_sided_seeds_missing_side_at_tick(settings: Settings, market, now) -> None:
     from kalshi_pbot.types import OrderBook, PriceLevel
 
-    settings = settings.model_copy(update={"quote_mode": "two_sided"})
+    settings = settings.model_copy(
+        update={"quote_mode": "two_sided", "only_quote_underround": False}
+    )
     strategy = MakerStrategy(settings)
     one_sided_book = OrderBook(
         ticker=market.ticker,
@@ -179,6 +181,40 @@ def test_fresh_unpaired_still_prefers_complete(settings: Settings, market, now) 
     assert quotes[0].outcome is Outcome.NO
 
 
+def test_paper_v2_tight_entry_requires_underround(market, now) -> None:
+    """Dig7: min_edge=0.04 does not skip ENTRY unless only_quote_underround (default)."""
+    settings = Settings(dry_run=True, mock=True, paper_tape=True)
+    assert settings.only_quote_underround is True
+    assert settings.min_edge == Decimal("0.04")
+    strategy = MakerStrategy(settings)
+    over = book("0.4800", "0.4900")  # 0.97 > 0.96
+    assert over.bid_sum() == Decimal("0.97")
+    assert not is_underround(over, settings.min_edge)
+    assert strategy.evaluate(market, over, empty_snapshot(settings), now=now) == []
+
+    under = book("0.4700", "0.4800")  # 0.95 ≤ 0.96
+    assert is_underround(under, settings.min_edge)
+    quotes = strategy.evaluate(market, under, empty_snapshot(settings), now=now)
+    assert quotes
+    assert quotes[0].kind is IntentKind.ENTRY
+
+
+def test_min_edge_alone_does_not_skip_overround_entry(market, now) -> None:
+    settings = Settings(
+        dry_run=True,
+        mock=True,
+        paper_tape=True,
+        only_quote_underround=False,
+        min_edge=Decimal("0.04"),
+    )
+    strategy = MakerStrategy(settings)
+    over = book("0.4800", "0.4900")
+    assert over.bid_sum() > Decimal("1") - settings.min_edge
+    quotes = strategy.evaluate(market, over, empty_snapshot(settings), now=now)
+    assert quotes
+    assert quotes[0].kind is IntentKind.ENTRY
+
+
 def test_only_quote_underround_skips_overround(settings: Settings, market, now) -> None:
     settings = settings.model_copy(
         update={"only_quote_underround": True, "min_edge": Decimal("0.02")}
@@ -209,14 +245,14 @@ def test_only_quote_underround_still_completes(settings: Settings, market, now) 
 def test_quote_stays_inside_implied_ask(settings: Settings, market, now) -> None:
     strategy = MakerStrategy(settings)
     quotes = strategy.evaluate(
-        market, book("0.4800", "0.5100"), empty_snapshot(settings), now=now
+        market, book("0.4700", "0.4800"), empty_snapshot(settings), now=now
     )
     assert quotes
     q = quotes[0]
     if q.outcome is Outcome.YES:
-        assert q.price < Decimal("1") - Decimal("0.5100")
-    else:
         assert q.price < Decimal("1") - Decimal("0.4800")
+    else:
+        assert q.price < Decimal("1") - Decimal("0.4700")
 
 
 def test_count_within_open_cap_blocks_overshoot() -> None:

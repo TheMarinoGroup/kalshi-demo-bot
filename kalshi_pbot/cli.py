@@ -197,6 +197,7 @@ def status() -> None:
         f"(flatten; hard kill ${settings.max_onesided})"
     )
     typer.echo(f"only_underround  {settings.only_quote_underround}")
+    typer.echo(f"kelly_max        {settings.kelly_max}  (size ≤ this fraction of bankroll)")
     typer.echo(f"last_seconds     {settings.last_seconds}  (Risk Desk floor 60s)")
     typer.echo(
         f"settle_recycle   {settings.effective_settle_recycle_seconds}s  "

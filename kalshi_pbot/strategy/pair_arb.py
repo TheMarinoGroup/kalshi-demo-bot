@@ -16,6 +16,7 @@ from decimal import Decimal
 
 from kalshi_pbot.config import CLIP_MAX, CLIP_MIN, Settings
 from kalshi_pbot.fees import maker_pair_viable, pair_edge, taker_pair_viable
+from kalshi_pbot.kelly import count_within_kelly
 from kalshi_pbot.risk_engine import has_unpaired_inventory
 from kalshi_pbot.strategy.maker import (
     clip_count,
@@ -51,6 +52,12 @@ class PairArbStrategy:
         if self.settings.only_quote_underround and not is_underround(book, self.settings.min_edge):
             return []
         count_hint = clip_count(self.settings.clip, Decimal("0.50"))
+        count_hint = count_within_kelly(
+            count_hint,
+            Decimal("0.50"),
+            self.settings.bankroll,
+            self.settings.kelly_max,
+        )
 
         if self.settings.taker_pair_arb:
             taker = self._taker_taker(market, book, count_hint)
@@ -136,6 +143,17 @@ class PairArbStrategy:
             clip_max=CLIP_MAX,
         )
         if count is None:
+            return []
+        count = min(
+            count,
+            count_within_kelly(
+                count, yes_px, self.settings.bankroll, self.settings.kelly_max
+            ),
+            count_within_kelly(
+                count, no_px, self.settings.bankroll, self.settings.kelly_max
+            ),
+        )
+        if count <= 0:
             return []
         if not maker_pair_viable(
             yes_px,

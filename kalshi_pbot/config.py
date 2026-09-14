@@ -25,6 +25,7 @@ from typing import Literal
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from kalshi_pbot.kelly import DEFAULT_KELLY_MAX
 from kalshi_pbot.series import MIN_WINDOW_MINUTES, filter_series
 from kalshi_pbot.types import D, QuoteMode
 
@@ -110,6 +111,10 @@ class Settings(BaseSettings):
     clip_dollars: Decimal = DEFAULT_CLIP
     quote_mode: QuoteMode = "one_sided"
     min_edge: Decimal = DEFAULT_MIN_EDGE
+    # Dig7: idle ENTRY only when bid_sum ≤ 1 − min_edge. min_edge alone does not skip.
+    only_quote_underround: bool = True
+    # Size ceiling as a fraction of bankroll. Intents above this are clipped / refused.
+    kelly_max: Decimal = DEFAULT_KELLY_MAX
     taker_pair_arb: bool = False
     tick_size: Decimal = Decimal("0.01")
     improve_ticks: int = 0
@@ -132,8 +137,6 @@ class Settings(BaseSettings):
     max_unpaired_age_seconds: int = DEFAULT_MAX_UNPAIRED_AGE_SECONDS
     # Soft preference: flatten / refuse growth above this notional (hard kill stays 3%).
     soft_onesided: Decimal = DEFAULT_SOFT_ONESIDED
-    # Soft preference: skip new ENTRY unless bid_sum ≤ 1 − min_edge (Regime B).
-    only_quote_underround: bool = False
     cfb_5hz: bool = False
     windows_path: str = "data/windows.json"
     tape_path: str = "data/tape.jsonl"
@@ -150,7 +153,13 @@ class Settings(BaseSettings):
     http_timeout: float = 15.0
 
     @field_validator(
-        "bankroll", "clip_dollars", "min_edge", "tick_size", "soft_onesided", mode="before"
+        "bankroll",
+        "clip_dollars",
+        "min_edge",
+        "tick_size",
+        "soft_onesided",
+        "kelly_max",
+        mode="before",
     )
     @classmethod
     def _decimalize(cls, value: object) -> Decimal:
@@ -177,6 +186,12 @@ class Settings(BaseSettings):
             raise ValueError("max_unpaired_age_seconds must be >= 0")
         if self.soft_onesided < 0:
             raise ValueError("soft_onesided must be >= 0")
+        if self.kelly_max <= 0:
+            raise ValueError("kelly_max must be positive")
+        if self.kelly_max > DEFAULT_KELLY_MAX:
+            raise ValueError(
+                f"kelly_max must be <= {DEFAULT_KELLY_MAX} (Dig7 Kelly clamp)"
+            )
         if self.daily_loss_limit <= self.clip and (
             self.soft_onesided <= 0 or self.max_unpaired_age_seconds <= 0
         ):

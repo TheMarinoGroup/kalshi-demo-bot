@@ -29,7 +29,13 @@ def test_taker_taker_rejected_on_normal_book(settings: Settings, market) -> None
 
 
 def test_taker_taker_only_when_asks_sum_below_one_after_fees(settings: Settings, market) -> None:
-    settings = settings.model_copy(update={"taker_pair_arb": True, "min_edge": Decimal("0.01")})
+    settings = settings.model_copy(
+        update={
+            "taker_pair_arb": True,
+            "min_edge": Decimal("0.01"),
+            "only_quote_underround": False,
+        }
+    )
     # Crossed / inverted book: yes bid 0.70 → no ask 0.30; no bid 0.70 → yes ask 0.30
     # Combined taker cost 0.60 + fees still << 1
     assert taker_pair_viable(
@@ -62,7 +68,9 @@ def test_maker_maker_when_join_prices_sum_below_one(settings: Settings, market) 
 
 
 def test_maker_maker_shades_when_join_sum_is_too_tight(settings: Settings, market) -> None:
-    settings = settings.model_copy(update={"min_edge": Decimal("0.04")})
+    settings = settings.model_copy(
+        update={"min_edge": Decimal("0.04"), "only_quote_underround": False}
+    )
     strategy = PairArbStrategy(settings)
     # Join would be 0.51+0.50 = 1.01; shade until Py+Pn <= 0.96
     quotes = strategy.evaluate(market, book("0.5100", "0.5000"), empty_snapshot(settings))
@@ -95,6 +103,7 @@ def test_pair_arb_respects_only_quote_underround(settings: Settings, market) -> 
 
 
 def test_taker_pair_disabled_by_default(settings: Settings, market) -> None:
+    settings = settings.model_copy(update={"only_quote_underround": False})
     strategy = PairArbStrategy(settings)
     # Even a hugely crossed book should not emit taker intents when the flag is off.
     quotes = strategy.evaluate(market, book("0.9000", "0.9000"), empty_snapshot(settings))

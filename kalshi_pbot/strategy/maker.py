@@ -15,6 +15,7 @@ from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
 
 from kalshi_pbot.config import CLIP_MAX, CLIP_MIN, Settings
 from kalshi_pbot.execution import flatten_intent
+from kalshi_pbot.kelly import count_within_kelly
 from kalshi_pbot.strategy.paper_v2 import PaperV2State, classify_paper_v2
 from kalshi_pbot.types import (
     IntentKind,
@@ -302,6 +303,12 @@ class MakerStrategy:
                 snapshot.open_notional,
                 self.settings.max_open_notional,
             )
+        raw = count_within_kelly(
+            raw,
+            price,
+            self.settings.bankroll,
+            self.settings.kelly_max,
+        )
         if raw <= 0:
             return None
         if kind is IntentKind.ENTRY and raw * price + Decimal("0.01") < CLIP_MIN:

@@ -34,6 +34,8 @@ def test_option_b_hard_caps() -> None:
     assert settings.taker_pair_arb is False
     assert settings.soft_onesided == Decimal("10")
     assert settings.max_unpaired_age_seconds == 45
+    assert settings.only_quote_underround is True
+    assert settings.kelly_max == Decimal("0.25")
 
 
 def test_option_b_requires_soft_abort_when_daily_equals_clip() -> None:
