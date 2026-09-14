@@ -27,17 +27,27 @@ DEMO_WS = "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2"
 PROD_REST = "https://external-api.kalshi.com/trade-api/v2"
 PROD_WS = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
 
-# Risk Desk v1 — locked fractions / dollars at the $1000 reference bankroll.
-REF_BANKROLL = Decimal("1000")
-OPEN_NOTIONAL_FRAC = Decimal("0.05")  # $50 at $1000
-DAILY_LOSS_FRAC = Decimal("0.02")  # $20 at $1000
-ONESIDED_FRAC = Decimal("0.03")  # $30 at $1000
-MAX_CONCURRENT_WINDOWS = 2
+# Risk Desk fractions (locked). Paper-v2 Option B reference bankroll is $500:
+# hard open $25 / onesided $15 / daily kill $10. Soft abort is mandatory
+# because daily kill = 1× clip. Fractions still rescale with KALSHI_BANKROLL.
+REF_BANKROLL = Decimal("500")
+OPEN_NOTIONAL_FRAC = Decimal("0.05")  # $25 at $500
+DAILY_LOSS_FRAC = Decimal("0.02")  # $10 at $500
+ONESIDED_FRAC = Decimal("0.03")  # $15 at $500
+MAX_CONCURRENT_WINDOWS = 1
 LAST_SECONDS_NO_RISK = 60
+# Paper-v2: no new risk earlier than the Risk Desk 60s floor.
+PAPER_V2_LAST_SECONDS = 120
+# Soft abort: flatten unpaired before the hard onesided kill ($15 at $500).
+# 0 disables age abort only when daily kill > clip (not Option B).
+DEFAULT_MAX_UNPAIRED_AGE_SECONDS = 45
+# Soft onesided flatten / no-grow. Hard kill stays ONESIDED_FRAC ($15 at $500).
+DEFAULT_SOFT_ONESIDED = Decimal("10")
 CLIP_MIN = Decimal("10")
 CLIP_MAX = Decimal("30")
-DEFAULT_CLIP = Decimal("20")
-DEFAULT_SERIES = ("KXBTC15M", "KXETH15M")
+DEFAULT_CLIP = Decimal("10")
+DEFAULT_MIN_EDGE = Decimal("0.04")
+DEFAULT_SERIES = ("KXBTC15M",)
 # Measured close→settlement_ts on public REST, N=8000 finalized
 # KXBTC15M+KXETH15M: p50≈7s, p90≈12s, p99≈59s. ~99% settle within 60s.
 # market.expected_expiration (~close+300s) is NOT actual settlement latency —
@@ -92,7 +102,7 @@ class Settings(BaseSettings):
     hud_port: int = 8080
     clip_dollars: Decimal = DEFAULT_CLIP
     quote_mode: QuoteMode = "one_sided"
-    min_edge: Decimal = Decimal("0.02")
+    min_edge: Decimal = DEFAULT_MIN_EDGE
     taker_pair_arb: bool = False
     tick_size: Decimal = Decimal("0.01")
     improve_ticks: int = 0
@@ -100,10 +110,10 @@ class Settings(BaseSettings):
     loop_seconds: float = 0.05
     discover_seconds: float = 15.0
     # Pause between series during events-first discovery so we do not burst
-    # GET /events for KXBTC15M then KXETH15M in a tight loop.
+    # Pause between series if more than one is configured.
     discover_series_delay: float = 0.4
     tob_heartbeat_ms: int = 100
-    last_seconds: int = LAST_SECONDS_NO_RISK
+    last_seconds: int = PAPER_V2_LAST_SECONDS
     # Paper capital velocity: recycle after close + this many seconds.
     # Default 75s sits in the 60–90s band (covers ~p99). Not expected_expiration.
     settle_recycle_seconds: int = SETTLE_RECYCLE_SECONDS
@@ -111,6 +121,12 @@ class Settings(BaseSettings):
     settle_rare_tail: bool = False
     settle_rare_tail_seconds: int = SETTLE_RARE_TAIL_SECONDS
     max_windows: int = MAX_CONCURRENT_WINDOWS
+    # Soft preference: flatten unpaired after this many seconds (not a Risk Desk kill).
+    max_unpaired_age_seconds: int = DEFAULT_MAX_UNPAIRED_AGE_SECONDS
+    # Soft preference: flatten / refuse growth above this notional (hard kill stays 3%).
+    soft_onesided: Decimal = DEFAULT_SOFT_ONESIDED
+    # Soft preference: skip new ENTRY unless bid_sum ≤ 1 − min_edge (Regime B).
+    only_quote_underround: bool = False
     cfb_5hz: bool = False
     windows_path: str = "data/windows.json"
     tape_path: str = "data/tape.jsonl"
@@ -120,7 +136,9 @@ class Settings(BaseSettings):
 
     http_timeout: float = 15.0
 
-    @field_validator("bankroll", "clip_dollars", "min_edge", "tick_size", mode="before")
+    @field_validator(
+        "bankroll", "clip_dollars", "min_edge", "tick_size", "soft_onesided", mode="before"
+    )
     @classmethod
     def _decimalize(cls, value: object) -> Decimal:
         return D(value)
@@ -142,6 +160,25 @@ class Settings(BaseSettings):
             raise ValueError("settle_recycle_seconds must be positive")
         if self.settle_rare_tail_seconds <= 0:
             raise ValueError("settle_rare_tail_seconds must be positive")
+        if self.max_unpaired_age_seconds < 0:
+            raise ValueError("max_unpaired_age_seconds must be >= 0")
+        if self.soft_onesided < 0:
+            raise ValueError("soft_onesided must be >= 0")
+        if self.daily_loss_limit <= self.clip and (
+            self.soft_onesided <= 0 or self.max_unpaired_age_seconds <= 0
+        ):
+            raise ValueError(
+                "daily kill <= clip requires soft_onesided > 0 and "
+                "max_unpaired_age_seconds > 0 (soft abort is mandatory)"
+            )
+        if self.last_seconds < LAST_SECONDS_NO_RISK:
+            raise ValueError(
+                f"last_seconds must be >= {LAST_SECONDS_NO_RISK} (Risk Desk v1 floor)"
+            )
+        if self.improve_ticks < 0:
+            raise ValueError("improve_ticks must be >= 0")
+        if self.max_windows < 1:
+            raise ValueError("max_windows must be >= 1")
         if self.min_window_minutes < MIN_WINDOW_MINUTES:
             raise ValueError(
                 f"min_window_minutes must be >= {MIN_WINDOW_MINUTES} "

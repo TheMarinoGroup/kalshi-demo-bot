@@ -6,7 +6,7 @@ from kalshi_pbot.config import Settings
 from kalshi_pbot.fees import pair_edge, taker_fee, taker_pair_viable
 from kalshi_pbot.strategy.pair_arb import PairArbStrategy
 from kalshi_pbot.types import Liquidity, Outcome
-from tests.conftest import book, empty_snapshot
+from tests.conftest import book, empty_snapshot, yes_position
 
 
 def test_taker_fee_peaks_near_mid() -> None:
@@ -75,6 +75,23 @@ def test_maker_maker_skips_when_edge_impossible(settings: Settings, market) -> N
     strategy = PairArbStrategy(settings)
     quotes = strategy.evaluate(market, book("0.4800", "0.4900"), empty_snapshot(settings))
     assert quotes == []
+
+
+def test_pair_arb_skips_when_unpaired_exists(settings: Settings, market) -> None:
+    strategy = PairArbStrategy(settings)
+    pos = yes_position("KXETH15M-OTHER")
+    snap = empty_snapshot(settings, positions={pos.market_ticker: pos})
+    assert strategy.evaluate(market, book("0.4700", "0.4800"), snap) == []
+
+
+def test_pair_arb_respects_only_quote_underround(settings: Settings, market) -> None:
+    settings = settings.model_copy(
+        update={"only_quote_underround": True, "min_edge": Decimal("0.02")}
+    )
+    strategy = PairArbStrategy(settings)
+    assert strategy.evaluate(market, book("0.5100", "0.5000"), empty_snapshot(settings)) == []
+    quotes = strategy.evaluate(market, book("0.4700", "0.4800"), empty_snapshot(settings))
+    assert len(quotes) == 2
 
 
 def test_taker_pair_disabled_by_default(settings: Settings, market) -> None:

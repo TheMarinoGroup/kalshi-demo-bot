@@ -1,16 +1,21 @@
 """Maker-first quoting for 15-minute crypto Up/Down markets.
 
-Default is one-sided: join (or optionally improve) the bid on a single
-outcome, preferring the side that completes an incomplete pair. Two-sided
-mode is available but still post_only and never crosses the implied ask.
+Paper-v2 Option B is one-sided and is driven by ``classify_paper_v2``:
+quote one clip while flat; after any fill/touch, complete the other side
+only; flatten on soft onesided ($10), unpaired age (45s), or if the
+completing quote cannot post; never open a new clip while unpaired exists.
+Two-sided mode is a legacy/test path only (``quote_mode=two_sided``).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
 
-from kalshi_pbot.config import Settings
+from kalshi_pbot.config import CLIP_MAX, CLIP_MIN, Settings
+from kalshi_pbot.execution import flatten_intent
+from kalshi_pbot.strategy.paper_v2 import PaperV2State, classify_paper_v2
 from kalshi_pbot.types import (
     IntentKind,
     Liquidity,
@@ -37,10 +42,16 @@ def quantize_price(price: Decimal, tick: Decimal = TICK) -> Decimal:
 
 
 def clip_count(clip_dollars: Decimal, price: Decimal) -> Decimal:
+    """Size a clip so notional stays inside the $10–$30 band when possible."""
     if price <= 0:
         return Decimal("0")
-    raw = (clip_dollars / price).to_integral_value(rounding=ROUND_DOWN)
-    return max(Decimal("1"), raw)
+    want = (clip_dollars / price).to_integral_value(rounding=ROUND_DOWN)
+    need = (CLIP_MIN / price).to_integral_value(rounding=ROUND_CEILING)
+    cap = (CLIP_MAX / price).to_integral_value(rounding=ROUND_DOWN)
+    count = max(need, want, Decimal("1"))
+    if cap > 0:
+        count = min(count, cap)
+    return count
 
 
 def paired_clip_count(
@@ -94,6 +105,12 @@ def _position(snapshot: PortfolioSnapshot, ticker: str) -> Position | None:
     return snapshot.positions.get(ticker)
 
 
+def is_underround(book: OrderBook, min_edge: Decimal) -> bool:
+    """True when yes_bid + no_bid is strictly inside 1 − min_edge (Regime B)."""
+    bid_sum = book.bid_sum()
+    return bid_sum is not None and bid_sum <= Decimal("1") - min_edge
+
+
 @dataclass
 class MakerStrategy:
     settings: Settings
@@ -103,19 +120,49 @@ class MakerStrategy:
         market: MarketWindow,
         book: OrderBook,
         snapshot: PortfolioSnapshot,
+        *,
+        now: datetime | None = None,
     ) -> list[QuoteIntent]:
+        now = now or datetime.now(UTC)
         pos = _position(snapshot, market.ticker)
         unpaired = pos.unpaired_outcome if pos else None
-        if unpaired is not None:
+
+        complete = None
+        can_complete = True
+        if unpaired is not None and pos is not None:
             completing = Outcome.NO if unpaired is Outcome.YES else Outcome.YES
-            intent = self._quote_side(
+            complete = self._quote_side(
                 market,
                 book,
                 completing,
                 kind=IntentKind.COMPLETE_PAIR,
                 reason="complete_incomplete_pair",
+                improve_ticks=self.settings.improve_ticks,
             )
-            return [intent] if intent else []
+            can_complete = complete is not None
+
+        decision = classify_paper_v2(
+            snapshot,
+            market.ticker,
+            self.settings,
+            now=now,
+            close_time=market.close_time,
+            can_complete=can_complete,
+        )
+        if decision.state is PaperV2State.HARD_KILL:
+            return []
+        if decision.flatten and pos is not None and unpaired is not None:
+            flatten = self._flatten_unpaired(
+                market, book, pos, unpaired, reason=decision.reason
+            )
+            return [flatten] if flatten else []
+        if decision.complete_other_side:
+            return [complete] if complete else []
+        if not decision.allow_new_onesided:
+            return []
+
+        if self.settings.only_quote_underround and not is_underround(book, self.settings.min_edge):
+            return []
 
         if self.settings.quote_mode == "two_sided":
             quotes = []
@@ -154,6 +201,40 @@ class MakerStrategy:
         )
         return [intent] if intent else []
 
+    def _flatten_unpaired(
+        self,
+        market: MarketWindow,
+        book: OrderBook,
+        pos: Position,
+        unpaired: Outcome,
+        *,
+        reason: str,
+    ) -> QuoteIntent | None:
+        bid = book.best_yes_bid() if unpaired is Outcome.YES else book.best_no_bid()
+        if bid is None or pos.unpaired_qty <= 0:
+            return None
+        intent = flatten_intent(
+            market.ticker,
+            market.event_ticker,
+            unpaired,
+            pos.unpaired_qty,
+            bid,
+        )
+        return QuoteIntent(
+            market_ticker=intent.market_ticker,
+            event_ticker=intent.event_ticker,
+            outcome=intent.outcome,
+            price=intent.price,
+            count=intent.count,
+            liquidity=intent.liquidity,
+            tif=intent.tif,
+            post_only=False,
+            reduce_only=True,
+            sell=True,
+            kind=IntentKind.FLATTEN,
+            reason=reason,
+        )
+
     def _quote_side(
         self,
         market: MarketWindow,
@@ -162,6 +243,7 @@ class MakerStrategy:
         *,
         kind: IntentKind,
         reason: str,
+        improve_ticks: int | None = None,
     ) -> QuoteIntent | None:
         if outcome is Outcome.YES:
             best = book.best_yes_bid()
@@ -173,7 +255,7 @@ class MakerStrategy:
             best,
             ask,
             tick=self.settings.tick_size,
-            improve_ticks=self.settings.improve_ticks,
+            improve_ticks=self.settings.improve_ticks if improve_ticks is None else improve_ticks,
         )
         if price is None:
             return None

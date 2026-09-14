@@ -16,7 +16,14 @@ from decimal import Decimal
 
 from kalshi_pbot.config import CLIP_MAX, CLIP_MIN, Settings
 from kalshi_pbot.fees import maker_pair_viable, pair_edge, taker_pair_viable
-from kalshi_pbot.strategy.maker import clip_count, join_bid, paired_clip_count, quantize_price
+from kalshi_pbot.risk_engine import has_unpaired_inventory
+from kalshi_pbot.strategy.maker import (
+    clip_count,
+    is_underround,
+    join_bid,
+    paired_clip_count,
+    quantize_price,
+)
 from kalshi_pbot.types import (
     IntentKind,
     Liquidity,
@@ -39,7 +46,10 @@ class PairArbStrategy:
         book: OrderBook,
         snapshot: PortfolioSnapshot,
     ) -> list[QuoteIntent]:
-        del snapshot  # pairing is book-driven; inventory completion lives in maker
+        if has_unpaired_inventory(snapshot):
+            return []
+        if self.settings.only_quote_underround and not is_underround(book, self.settings.min_edge):
+            return []
         count_hint = clip_count(self.settings.clip, Decimal("0.50"))
 
         if self.settings.taker_pair_arb:

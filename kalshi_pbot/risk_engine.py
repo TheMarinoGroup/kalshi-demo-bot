@@ -1,5 +1,6 @@
-"""Risk Desk v1 — locked hard limits for the $1000 paper bankroll.
+"""Risk Desk v1 — locked hard limits (5% / 3% / 2% of bankroll).
 
+Paper-v2 Option B defaults are $500: open $25, onesided $15, daily $10.
 Limits rescale with `settings.bankroll`. Kill switch cancels/refuses
 until an explicit reset. Last 60s of each window: no new risk.
 
@@ -18,6 +19,7 @@ from kalshi_pbot.config import CLIP_MAX, CLIP_MIN, Settings
 from kalshi_pbot.types import (
     IntentKind,
     PortfolioSnapshot,
+    Position,
     QuoteIntent,
     RejectReason,
     RiskDecision,
@@ -89,6 +91,50 @@ def recycle_ready(
         expected_expiration=expected_expiration,
     )
     return _now(now) >= free
+
+
+def has_unpaired_inventory(snapshot: PortfolioSnapshot) -> bool:
+    return any(pos.unpaired_qty > 0 for pos in snapshot.positions.values())
+
+
+def unpaired_age_seconds(pos: Position, now: datetime | None = None) -> float | None:
+    if pos.unpaired_qty <= 0 or pos.unpaired_since is None:
+        return None
+    return (_now(now) - _aware(pos.unpaired_since)).total_seconds()
+
+
+def over_soft_onesided(pos: Position, settings: Settings) -> bool:
+    """True when unpaired notional is strictly above the soft onesided preference."""
+    if pos.unpaired_qty <= 0 or settings.soft_onesided <= 0:
+        return False
+    return pos.unpaired_notional() > settings.soft_onesided
+
+
+def should_abort_unpaired(
+    pos: Position,
+    settings: Settings,
+    now: datetime | None = None,
+) -> bool:
+    """Soft flatten: age or notional over the soft preference. Does not trip the hard kill."""
+    if pos.unpaired_qty <= 0:
+        return False
+    if over_soft_onesided(pos, settings):
+        return True
+    max_age = settings.max_unpaired_age_seconds
+    if max_age <= 0:
+        return False
+    age = unpaired_age_seconds(pos, now)
+    return age is not None and age >= max_age
+
+
+def unpaired_abort_reason(
+    pos: Position,
+    settings: Settings,
+    now: datetime | None = None,
+) -> str:
+    if over_soft_onesided(pos, settings):
+        return "unpaired_soft_abort"
+    return "unpaired_age_abort"
 
 
 def classify_kill(reason: str) -> str:
@@ -177,6 +223,17 @@ class RiskEngine:
                 False,
                 RejectReason.LAST_SECONDS,
                 f"no new risk in last {self.settings.last_seconds}s before close",
+            )
+
+        if (
+            not flatten_like
+            and intent.kind is IntentKind.ENTRY
+            and has_unpaired_inventory(snapshot)
+        ):
+            return RiskDecision(
+                False,
+                RejectReason.UNPAIRED_EXISTS,
+                "no new clip while unpaired inventory exists",
             )
 
         if not flatten_like:

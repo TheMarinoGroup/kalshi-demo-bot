@@ -222,7 +222,7 @@ def _book_depth(
     ask_sum = book.ask_sum()
     yes_ask = book.implied_yes_ask()
     no_ask = book.implied_no_ask()
-    underround = bool(bid_sum is not None and bid_sum < Decimal("1") - min_edge)
+    underround = bool(bid_sum is not None and bid_sum <= Decimal("1") - min_edge)
     ask_plus_fees = None
     taker_ok = False
     if yes_ask is not None and no_ask is not None:

@@ -4,7 +4,13 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from kalshi_pbot.config import Settings
-from kalshi_pbot.risk_engine import RiskEngine, classify_kill, in_last_seconds
+from kalshi_pbot.risk_engine import (
+    RiskEngine,
+    classify_kill,
+    in_last_seconds,
+    over_soft_onesided,
+    should_abort_unpaired,
+)
 from kalshi_pbot.types import IntentKind, Liquidity, Outcome, QuoteIntent, RejectReason, TimeInForce
 from tests.conftest import empty_snapshot, yes_position
 
@@ -123,10 +129,22 @@ def test_onesided_cap_is_aggregate_across_windows(settings: Settings, now: datet
         window_ids=frozenset({btc.event_ticker}),
         open_notional=Decimal("25"),
     )
-    eth = _intent(event="KXETH15M-B", price="0.50", count="40")  # +$20 → $45 > $30
+    eth = _intent(event="KXETH15M-B", price="0.50", count="40")  # new one-sided while unpaired
     decision = engine.evaluate(eth, snap, close_time=close, now=now)
     assert decision.allowed is False
-    assert decision.reason is RejectReason.ONESIDED_CAP
+    assert decision.reason is RejectReason.UNPAIRED_EXISTS
+    assert not engine.kill_active
+
+    # Hard $30 cap still applies to completing-style size on another window.
+    complete_other = _intent(
+        event="KXETH15M-B",
+        price="0.50",
+        count="40",
+        kind=IntentKind.COMPLETE_PAIR,
+    )
+    hard = engine.evaluate(complete_other, snap, close_time=close, now=now)
+    assert hard.allowed is False
+    assert hard.reason is RejectReason.ONESIDED_CAP
 
 
 def test_open_and_onesided_kill_latch_at_exact_cap(settings: Settings, now: datetime) -> None:
@@ -165,6 +183,28 @@ def test_open_breach_trips_kill_code(settings: Settings, now: datetime) -> None:
     assert engine.kill_active
     assert decision.reason is RejectReason.KILL_SWITCH
     assert classify_kill(engine.kill_reason) == "open"
+
+
+def test_soft_unpaired_blocks_new_entry_without_kill(settings: Settings, now: datetime) -> None:
+    engine = RiskEngine(settings)
+    close = now + timedelta(minutes=10)
+    pos = yes_position(qty="20", px="0.50")  # $10 unpaired — well under $30 kill
+    snap = empty_snapshot(
+        settings,
+        positions={pos.market_ticker: pos},
+        unpaired_notional=pos.unpaired_notional(),
+        window_ids=frozenset({pos.event_ticker}),
+        open_notional=Decimal("10"),
+    )
+    decision = engine.evaluate(
+        _intent(event="KXETH15M-B", price="0.50", count="20"),
+        snap,
+        close_time=close,
+        now=now,
+    )
+    assert decision.allowed is False
+    assert decision.reason is RejectReason.UNPAIRED_EXISTS
+    assert not engine.kill_active
 
 
 def test_onesided_cap_allows_completing_other_side(settings: Settings, now: datetime) -> None:
@@ -247,6 +287,53 @@ def test_limits_rescale_with_bankroll(now: datetime) -> None:
     snap = empty_snapshot(fat, daily_pnl=Decimal("-21"))
     # -$21 is fatal at $1000 but not at $2000
     assert engine.evaluate(_intent(), snap, close_time=close, now=now).allowed
+
+
+def test_should_abort_unpaired_respects_age_knob(settings: Settings, now: datetime) -> None:
+    pos = yes_position(qty="20", px="0.50", unpaired_since=now - timedelta(seconds=45))
+    aged = settings.model_copy(
+        update={"max_unpaired_age_seconds": 45, "soft_onesided": Decimal("30")}
+    )
+    off = settings.model_copy(
+        update={"max_unpaired_age_seconds": 0, "soft_onesided": Decimal("30")}
+    )
+    fresh = yes_position(qty="20", px="0.50", unpaired_since=now - timedelta(seconds=10))
+    assert should_abort_unpaired(pos, aged, now) is True
+    assert should_abort_unpaired(pos, off, now) is False
+    assert should_abort_unpaired(fresh, aged, now) is False
+    assert should_abort_unpaired(yes_position(qty="20"), aged, now) is False
+
+
+def test_soft_onesided_abort_is_not_a_kill(settings: Settings, now: datetime) -> None:
+    engine = RiskEngine(settings)
+    pos = yes_position(qty="30", px="0.50")  # $15 > $10 soft, < $30 hard
+    assert over_soft_onesided(pos, settings) is True
+    assert should_abort_unpaired(pos, settings, now) is True
+    snap = empty_snapshot(
+        settings,
+        positions={pos.market_ticker: pos},
+        unpaired_notional=pos.unpaired_notional(),
+        open_notional=Decimal("15"),
+    )
+    engine.maybe_trip_limits(snap)
+    assert not engine.kill_active
+    flatten = engine.evaluate(
+        _intent(kind=IntentKind.FLATTEN, reduce_only=True),
+        snap,
+        close_time=now + timedelta(minutes=10),
+        now=now,
+    )
+    assert flatten.allowed
+
+
+def test_last_120s_blocks_new_entry(settings: Settings, now: datetime) -> None:
+    engine = RiskEngine(settings)
+    assert settings.last_seconds == 120
+    close = now + timedelta(seconds=90)
+    snap = empty_snapshot(settings)
+    decision = engine.evaluate(_intent(), snap, close_time=close, now=now)
+    assert decision.allowed is False
+    assert decision.reason is RejectReason.LAST_SECONDS
 
 
 def test_naive_close_time_is_treated_as_utc(settings: Settings) -> None:

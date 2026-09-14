@@ -24,7 +24,13 @@ def _research_paths(tmp_path, monkeypatch) -> None:
 
 @pytest.fixture
 def settings() -> Settings:
-    return Settings(bankroll=Decimal("1000"), dry_run=True, mock=True, paper_tape=True)
+    return Settings(
+        bankroll=Decimal("1000"),
+        dry_run=True,
+        mock=True,
+        paper_tape=True,
+        max_windows=2,
+    )
 
 
 @pytest.fixture
@@ -87,7 +93,13 @@ def empty_snapshot(settings: Settings, **kwargs: object) -> PortfolioSnapshot:
     )
 
 
-def yes_position(ticker: str = "KXBTC15M-MOCK", qty: str = "40", px: str = "0.50") -> Position:
+def yes_position(
+    ticker: str = "KXBTC15M-MOCK",
+    qty: str = "40",
+    px: str = "0.50",
+    *,
+    unpaired_since: datetime | None = None,
+) -> Position:
     q = Decimal(qty)
     p = Decimal(px)
     return Position(
@@ -95,4 +107,5 @@ def yes_position(ticker: str = "KXBTC15M-MOCK", qty: str = "40", px: str = "0.50
         event_ticker=ticker,
         yes_qty=q,
         yes_cost=q * p,
+        unpaired_since=unpaired_since,
     )

@@ -49,14 +49,14 @@ def test_snapshot_must_show_panels_from_mock_bot() -> None:
     assert snap["mode"]["paper_only"] is True
     assert snap["mode"]["hard_stop"] is False
     assert snap["mode"]["live_submit"] is False
-    assert snap["risk"]["bankroll"] == 1000
-    assert snap["risk"]["clip"] == 20
+    assert snap["risk"]["bankroll"] == 500
+    assert snap["risk"]["clip"] == 10
     assert snap["risk"]["clip_min"] == float(CLIP_MIN)
     assert snap["risk"]["clip_max"] == float(CLIP_MAX)
-    assert snap["risk"]["max_open"] == 50
-    assert snap["risk"]["max_onesided"] == 30
-    assert snap["risk"]["daily_kill"] == 20
-    assert snap["risk"]["max_windows"] == 2
+    assert snap["risk"]["max_open"] == 25
+    assert snap["risk"]["max_onesided"] == 15
+    assert snap["risk"]["daily_kill"] == 10
+    assert snap["risk"]["max_windows"] == 1
     assert snap["risk"]["unsettled_until"] == "settlement_ts"
     assert snap["risk"]["settle_band"] == [60, 90]
     assert snap["fees"]["maker_pending_confirm"] is True
@@ -77,7 +77,7 @@ def test_snapshot_must_show_panels_from_mock_bot() -> None:
     assert win["floor_strike"] == 65000
     assert win["bid_sum"] == 0.97  # 0.48 + 0.49
     assert win["ask_sum"] == 1.03
-    assert win["underround"] is True
+    assert win["underround"] is False  # 0.97 > 1 − 0.04 paper-v2 min_edge
     assert win["arb_taker_eligible"] is False
     assert win["arb"] is False  # must not flash green ARB for underround
     assert win["yes_bid_sz"] == 40

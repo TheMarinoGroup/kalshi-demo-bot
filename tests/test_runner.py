@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from kalshi_pbot.config import Settings
 from kalshi_pbot.runner import PaperBot
-from kalshi_pbot.types import Liquidity
+from kalshi_pbot.types import Fill, IntentKind, Liquidity, Outcome
 
 
 def test_mock_bot_discovers_and_dry_runs_quotes() -> None:
@@ -27,9 +29,17 @@ def test_mock_bot_discovers_and_dry_runs_quotes() -> None:
     assert bot.portfolio.orders_submitted == len(submitted)
     assert bot.settings.paper_tape is True
     assert bot.settings.live_submit is False
-    # Risk Desk utilization is logged via metrics; open notional stays under $50
+    # Risk Desk utilization is logged via metrics; Option B open cap is $25
     snap = bot.portfolio.snapshot({ticker: book})
     assert snap.open_notional <= settings.max_open_notional
+    entries = [q for q in submitted if q.kind is IntentKind.ENTRY]
+    assert entries
+    assert all("pair" not in (q.reason or "") for q in entries)
+    by_ticker: dict[str, list] = {}
+    for q in entries:
+        by_ticker.setdefault(q.market_ticker, []).append(q)
+    for quotes in by_ticker.values():
+        assert len(quotes) == 1
 
 
 def test_discover_once_mock() -> None:
@@ -66,3 +76,85 @@ async def test_run_does_not_burst_discover_after_startup() -> None:
 
     await asyncio.gather(bot.run(), stop_soon())
     assert calls["n"] == 1
+
+
+def _yes_fill(ticker: str, *, count: str = "20", price: str = "0.50") -> Fill:
+    return Fill(
+        fill_id="f1",
+        order_id="o1",
+        market_ticker=ticker,
+        event_ticker=ticker,
+        outcome=Outcome.YES,
+        price=Decimal(price),
+        count=Decimal(count),
+        fee=Decimal("0"),
+        is_taker=False,
+        ts_ms=int(datetime.now(UTC).timestamp() * 1000),
+    )
+
+
+def test_runner_skips_new_onesided_when_unpaired_exists() -> None:
+    settings = Settings(mock=True, dry_run=True, series="KXBTC15M,KXETH15M", max_windows=2)
+    bot = PaperBot(settings)
+    bot.universe.refresh()
+    bot.universe.hydrate_books(bot.books)
+    btc = next(t for t in bot.universe.markets if t.startswith("KXBTC15M"))
+    eth = next(t for t in bot.universe.markets if t.startswith("KXETH15M"))
+    bot.portfolio.apply_fill(_yes_fill(btc))
+
+    submitted = bot.step()
+    eth_entries = [
+        q
+        for q in submitted
+        if q.market_ticker == eth and q.kind is IntentKind.ENTRY
+    ]
+    assert eth_entries == []
+    btc_quotes = [q for q in submitted if q.market_ticker == btc]
+    assert btc_quotes
+    assert all(q.kind in {IntentKind.COMPLETE_PAIR, IntentKind.FLATTEN} for q in btc_quotes)
+
+
+def test_runner_age_aborts_unpaired() -> None:
+    settings = Settings(
+        mock=True,
+        dry_run=True,
+        series="KXBTC15M",
+        max_unpaired_age_seconds=45,
+        soft_onesided=Decimal("30"),
+    )
+    bot = PaperBot(settings)
+    bot.universe.refresh()
+    bot.universe.hydrate_books(bot.books)
+    ticker = next(iter(bot.universe.markets))
+    bot.portfolio.apply_fill(_yes_fill(ticker))
+    pos = bot.portfolio.positions[ticker]
+    pos.unpaired_since = datetime.now(UTC) - timedelta(seconds=46)
+
+    submitted = bot.step()
+    flats = [q for q in submitted if q.kind is IntentKind.FLATTEN]
+    assert flats
+    assert all(q.reason == "unpaired_age_abort" for q in flats)
+    assert pos.unpaired_qty > 0
+
+
+def test_runner_soft_onesided_aborts_without_kill() -> None:
+    settings = Settings(
+        mock=True,
+        dry_run=True,
+        series="KXBTC15M",
+        bankroll=Decimal("1000"),
+        clip_dollars=Decimal("10"),
+    )
+    bot = PaperBot(settings)
+    bot.universe.refresh()
+    bot.universe.hydrate_books(bot.books)
+    ticker = next(iter(bot.universe.markets))
+    bot.portfolio.apply_fill(_yes_fill(ticker, count="30", price="0.50"))  # $15
+    pos = bot.portfolio.positions[ticker]
+    pos.unpaired_since = datetime.now(UTC)
+
+    submitted = bot.step()
+    flats = [q for q in submitted if q.kind is IntentKind.FLATTEN]
+    assert flats
+    assert all(q.reason == "unpaired_soft_abort" for q in flats)
+    assert not bot.risk.kill_active

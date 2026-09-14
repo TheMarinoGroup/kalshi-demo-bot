@@ -22,7 +22,13 @@ from kalshi_pbot.market_data import (
 from kalshi_pbot.metrics import compute_metrics, emit_metrics
 from kalshi_pbot.paper_matcher import PaperMatcher
 from kalshi_pbot.portfolio import Portfolio
-from kalshi_pbot.risk_engine import RiskEngine, recycle_ready, seconds_since_close
+from kalshi_pbot.risk_engine import (
+    RiskEngine,
+    recycle_ready,
+    seconds_since_close,
+    should_abort_unpaired,
+    unpaired_abort_reason,
+)
 from kalshi_pbot.strategy.maker import MakerStrategy
 from kalshi_pbot.strategy.pair_arb import PairArbStrategy
 from kalshi_pbot.tape import JsonlTape
@@ -91,6 +97,14 @@ class PaperBot:
             max_open=str(self.settings.max_open_notional),
             daily_kill=str(self.settings.daily_loss_limit),
             onesided=str(self.settings.max_onesided),
+            max_windows=self.settings.max_windows,
+            max_unpaired_age_s=self.settings.max_unpaired_age_seconds,
+            soft_onesided=str(self.settings.soft_onesided),
+            last_seconds=self.settings.last_seconds,
+            min_edge=str(self.settings.min_edge),
+            quote_mode=self.settings.quote_mode,
+            improve_ticks=self.settings.improve_ticks,
+            only_quote_underround=self.settings.only_quote_underround,
             clip=str(self.settings.clip),
             settle_recycle_s=self.settings.effective_settle_recycle_seconds,
             settle_rare_tail=self.settings.settle_rare_tail,
@@ -273,7 +287,23 @@ class PaperBot:
         submitted: list[QuoteIntent] = []
 
         for market in self.universe.flatten_only(now=now):
-            self._flatten_window(market, snapshot, now)
+            flat = self._flatten_window(market, snapshot, now, reason="last_60s_flatten_unpaired")
+            if flat:
+                submitted.append(flat)
+
+        aged_tickers: set[str] = set()
+        for market in self._aged_unpaired_markets(snapshot, now):
+            aged_tickers.add(market.ticker)
+            pos = snapshot.positions.get(market.ticker)
+            reason = (
+                unpaired_abort_reason(pos, self.settings, now)
+                if pos
+                else "unpaired_age_abort"
+            )
+            flat = self._flatten_window(market, snapshot, now, reason=reason)
+            if flat:
+                submitted.append(flat)
+            snapshot = self.portfolio.snapshot(books)
 
         if self.risk.kill_active:
             emit_metrics(compute_metrics(self.settings, self.portfolio, snapshot))
@@ -281,12 +311,18 @@ class PaperBot:
             return submitted
 
         for market in self.universe.tradable(now=now):
+            if market.ticker in aged_tickers:
+                continue
             book = self.books.get(market.ticker)
             if book is None:
                 continue
-            intents = self._decide(market, book, snapshot)
+            intents = self._decide(market, book, snapshot, now=now)
             for intent in intents:
-                if self._already_quoting(intent):
+                if intent.kind is IntentKind.FLATTEN:
+                    self.execution.cancel_market(
+                        market.ticker, market.event_ticker, intent.reason or "unpaired_abort"
+                    )
+                elif self._already_quoting(intent):
                     continue
                 decision = self.risk.evaluate(
                     intent, snapshot, close_time=market.close_time, now=now
@@ -431,15 +467,26 @@ class PaperBot:
         market: MarketWindow,
         book: OrderBook,
         snapshot,
+        now: datetime | None = None,
     ) -> list[QuoteIntent]:
         pos = snapshot.positions.get(market.ticker)
         if pos and pos.unpaired_outcome is not None:
-            return self.maker.evaluate(market, book, snapshot)
+            return self.maker.evaluate(market, book, snapshot, now=now)
 
-        pair_quotes = self.pair_arb.evaluate(market, book, snapshot)
-        if pair_quotes:
-            return pair_quotes
-        return self.maker.evaluate(market, book, snapshot)
+        # Pair-arb is two-sided. Paper-v2 Option B stays one_sided.
+        if self.settings.quote_mode == "two_sided":
+            pair_quotes = self.pair_arb.evaluate(market, book, snapshot)
+            if pair_quotes:
+                return pair_quotes
+        return self.maker.evaluate(market, book, snapshot, now=now)
+
+    def _aged_unpaired_markets(self, snapshot, now: datetime) -> list[MarketWindow]:
+        aged: list[MarketWindow] = []
+        for market in self.universe.markets.values():
+            pos = snapshot.positions.get(market.ticker)
+            if pos is not None and should_abort_unpaired(pos, self.settings, now):
+                aged.append(market)
+        return aged
 
     def _already_quoting(self, intent: QuoteIntent) -> bool:
         for order in self.portfolio.resting_for(intent.market_ticker):
@@ -447,19 +494,27 @@ class PaperBot:
                 return True
         return False
 
-    def _flatten_window(self, market: MarketWindow, snapshot, now: datetime) -> None:
-        self.execution.cancel_market(market.ticker, market.event_ticker, "last_60s_cancel")
+    def _flatten_window(
+        self,
+        market: MarketWindow,
+        snapshot,
+        now: datetime,
+        *,
+        reason: str = "last_60s_flatten_unpaired",
+    ) -> QuoteIntent | None:
+        cancel_reason = "last_60s_cancel" if reason.startswith("last_60s") else reason
+        self.execution.cancel_market(market.ticker, market.event_ticker, cancel_reason)
         pos = snapshot.positions.get(market.ticker)
         book = self.books.get(market.ticker)
         if pos is None or book is None or pos.unpaired_qty <= 0:
-            return
+            return None
         outcome = pos.unpaired_outcome
         if outcome is None:
-            return
+            return None
         bid = book.best_yes_bid() if outcome.value == "yes" else book.best_no_bid()
         if bid is None:
             log.warning("flatten_no_bid", ticker=market.ticker, outcome=outcome.value)
-            return
+            return None
         intent = flatten_intent(
             market.ticker,
             market.event_ticker,
@@ -479,13 +534,14 @@ class PaperBot:
             reduce_only=True,
             sell=True,
             kind=IntentKind.FLATTEN,
-            reason="last_60s_flatten_unpaired",
+            reason=reason,
         )
         decision = self.risk.evaluate(intent, snapshot, close_time=market.close_time, now=now)
         if decision.allowed:
             self.execution.submit(intent, book=book)
-        else:
-            log.info("flatten_blocked", detail=decision.detail)
+            return intent
+        log.info("flatten_blocked", detail=decision.detail)
+        return None
 
 
 def _ws_ts_ms(body: dict) -> int:
