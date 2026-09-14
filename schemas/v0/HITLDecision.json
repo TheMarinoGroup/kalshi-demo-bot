@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://themarinogroup.github.io/kalshi-demo-bot/schemas/v0/HITLDecision.json",
+  "title": "HITLDecision",
+  "description": "Dig6 MM frozen stub. Human or atlas decision on a queued SizeIntent.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["intent_id", "decision", "actor", "ts"],
+  "properties": {
+    "intent_id": { "type": "string", "minLength": 1 },
+    "decision": {
+      "type": "string",
+      "enum": ["approve", "deny", "timeout_deny"]
+    },
+    "actor": {
+      "type": "string",
+      "enum": ["user", "atlas"]
+    },
+    "ts": { "type": "string", "format": "date-time" }
+  }
+}

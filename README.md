@@ -378,7 +378,7 @@ $/$15, `util_windows` n/1, `day_pnl_net` vs −$10 (incl. unsettled),
 unpaired-abort / kill strobe. CFB lag and maker fee show **—** until
 measured.
 
-1. Mode badge — **PAPER** only (LIVE without approval = hard-stop visual)
+1. Mode badge — **PAPER** / **HITL** (`DESK_MODE`; LIVE is unreachable / **LIVE_BLOCKED**, no unlock)
 2. Bankroll — config-driven (`KALSHI_BANKROLL`, default $500)
 3. Clip / last fill — $10–$30 band (default $10)
 4. Open notional util — $ / $25 + % bar (≥80% amber; ≥$25 red/kill)
@@ -390,6 +390,10 @@ measured.
 10. Settle buffer / unlock — free on `settlement_ts`; plan 60–90s (**not** `expected_expiration` +5m)
 11. Kill switch — ARMED / TRIPPED + reason (loss / open / one-sided / manual) + manual kill
 12. Compact limit strip — fill · open · windows · one-sided · daily loss
+13. HITL approvals — pending `entry` SizeIntents (ticker, side, clip, edge, kill headroom) with Approve / Deny → `POST /v0/hitl/{intent_id}`
+14. Size / Family D — `scale_in` shows `blocked_by=LANE_MM` (no SCALE path)
+
+**HITL mode** (`DESK_MODE=HITL`): new-risk `entry` waits for human approve (default 60s timeout → `timeout_deny` / `HITL_BLOCK`). Reduce-only / flatten / soft-abort proceed without approval. **PAPER** keeps the auto paper-v2 path and an empty queue. Contracts: `schemas/v0/` (HITLDecision, DeskMode, SizeIntent.v0.1-mm, BusEvent). `allow_production` stays false.
 
 Colors: green inside limits / amber ~80% / red breach or kill. There is
 **no** max-daily-notional gauge. Also shown when space allows: drawdown

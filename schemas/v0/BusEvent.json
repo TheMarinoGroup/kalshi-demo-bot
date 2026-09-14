@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://themarinogroup.github.io/kalshi-demo-bot/schemas/v0/BusEvent.json",
+  "title": "BusEvent",
+  "description": "Dig6 MM frozen stub. SoftAbort precedes HardKill on the desk strip.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["code", "ts"],
+  "properties": {
+    "code": {
+      "type": "string",
+      "enum": [
+        "SoftAbort",
+        "NoNewRisk",
+        "UnpairedKill",
+        "DailyKillLatched",
+        "HardKill",
+        "KillCleared"
+      ]
+    },
+    "ts": { "type": "string", "format": "date-time" },
+    "ticker": { "type": ["string", "null"] },
+    "detail": { "type": "string" }
+  }
+}

@@ -18,6 +18,7 @@ Read-only prod WebSocket is opt-in via ``KALSHI_ALLOW_PROD_WS=1`` and does
 
 from __future__ import annotations
 
+import os
 from decimal import Decimal
 from functools import cached_property
 from typing import Literal
@@ -73,6 +74,19 @@ PROD_HOSTS = (
     "api.elections.kalshi.com",
 )
 CFB_INDEX = {"KXBTC15M": "BRTI", "KXETH15M": "ETHUSD_RTI"}
+DESK_PROFILE = "dig6_tight"
+
+
+def coerce_desk_mode(value: object) -> str:
+    """PAPER | HITL. LIVE is unreachable and becomes LIVE_BLOCKED (no unlock)."""
+    raw = str(value or "PAPER").strip().upper().replace("-", "_")
+    if raw in {"LIVE", "LIVE_BLOCKED", "PRODUCTION"}:
+        return "LIVE_BLOCKED"
+    if raw == "HITL":
+        return "HITL"
+    if raw == "PAPER":
+        return "PAPER"
+    raise ValueError("DESK_MODE must be PAPER or HITL (LIVE is unreachable / LIVE_BLOCKED)")
 
 
 class Settings(BaseSettings):
@@ -115,6 +129,9 @@ class Settings(BaseSettings):
     only_quote_underround: bool = True
     # Size ceiling as a fraction of bankroll. Intents above this are clipped / refused.
     kelly_max: Decimal = DEFAULT_KELLY_MAX
+    # Dig6 MM desk. PAPER auto-quotes. HITL queues new-risk ENTRY. LIVE → LIVE_BLOCKED.
+    desk_mode: Literal["PAPER", "HITL", "LIVE_BLOCKED"] = "PAPER"
+    hitl_timeout_seconds: int = 60
     taker_pair_arb: bool = False
     tick_size: Decimal = Decimal("0.01")
     improve_ticks: int = 0
@@ -172,6 +189,29 @@ class Settings(BaseSettings):
             return ",".join(str(v) for v in value)
         return str(value)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _desk_mode_env(cls, data: object) -> object:
+        """Honor DESK_MODE (unprefixed) as well as KALSHI_DESK_MODE."""
+        if not isinstance(data, dict):
+            return data
+        if data.get("desk_mode") in (None, ""):
+            env = os.environ.get("DESK_MODE") or os.environ.get("KALSHI_DESK_MODE")
+            if env:
+                data = dict(data)
+                data["desk_mode"] = env
+        if data.get("hitl_timeout_seconds") in (None, ""):
+            env_t = os.environ.get("HITL_TIMEOUT_SECONDS")
+            if env_t:
+                data = dict(data)
+                data["hitl_timeout_seconds"] = env_t
+        return data
+
+    @field_validator("desk_mode", mode="before")
+    @classmethod
+    def _coerce_desk_mode(cls, value: object) -> str:
+        return coerce_desk_mode(value)
+
     @model_validator(mode="after")
     def _safety(self) -> Settings:
         if self.bankroll <= 0:
@@ -192,6 +232,8 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"kelly_max must be <= {DEFAULT_KELLY_MAX} (Dig7 Kelly clamp)"
             )
+        if self.hitl_timeout_seconds <= 0:
+            raise ValueError("hitl_timeout_seconds must be > 0")
         if self.daily_loss_limit <= self.clip and (
             self.soft_onesided <= 0 or self.max_unpaired_age_seconds <= 0
         ):

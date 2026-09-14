@@ -111,10 +111,14 @@ export type HudSnapshot = {
     allow_production?: boolean;
     mock: boolean;
     latency_ms: number;
-    badge: "PAPER" | "LIVE";
+    badge: "PAPER" | "LIVE" | "HITL" | "LIVE_BLOCKED";
     paper_only: boolean;
     hard_stop: boolean;
     demo_submit?: boolean;
+    desk_mode?: "PAPER" | "HITL" | "LIVE_BLOCKED";
+    desk_lane?: string;
+    profile?: string;
+    paper?: boolean;
   };
   reconcile?: {
     ready_to_trade: boolean;
@@ -234,6 +238,8 @@ export type HudSnapshot = {
     taker_fills: number;
     mix: { BTC: number; ETH: number; OTHER: number };
     quote_mode: string;
+    family_d?: boolean;
+    scale_in_blocked_by?: string;
   };
   pnl: {
     realized: number;
@@ -273,4 +279,44 @@ export type HudSnapshot = {
   }[];
   fills: FillRow[];
   series: string[];
+  desk_mode?: {
+    desk_lane: "MM";
+    mode: "PAPER" | "HITL" | "LIVE_BLOCKED";
+    paper: true;
+    profile: "dig6_tight";
+    bankroll: string;
+  };
+  hitl_queue?: {
+    intent_id: string;
+    desk_lane: "MM";
+    mode: "entry" | "complete_only" | "reduce_only" | "flat";
+    ticker: string;
+    side: "yes" | "no";
+    clip?: string | null;
+    count?: string | null;
+    price?: string | null;
+    kelly_frac?: number | null;
+    edge?: number | null;
+    p_star?: number | null;
+    projected_open?: string | null;
+    projected_onesided?: string | null;
+    kill_headroom?: string | null;
+    blocked_by?: string | null;
+    ts?: string | null;
+  }[];
+  bus_events?: {
+    code: "SoftAbort" | "NoNewRisk" | "UnpairedKill" | "DailyKillLatched" | "HardKill" | "KillCleared";
+    ts: string;
+    ticker?: string | null;
+    detail?: string;
+  }[];
+  size?: {
+    lane: string;
+    family_d: boolean;
+    scale_in: { accepted: boolean; blocked_by: string };
+    kelly_max: number;
+    note?: string;
+  };
+  allow_production?: boolean;
+  hitl_timeout_s?: number;
 };

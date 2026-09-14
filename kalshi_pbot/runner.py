@@ -11,6 +11,7 @@ import structlog
 
 from kalshi_pbot.config import Settings
 from kalshi_pbot.execution import ExecutionEngine, flatten_intent
+from kalshi_pbot.hitl import HitlDesk
 from kalshi_pbot.hud_state import MidHistory, build_snapshot
 from kalshi_pbot.kalshi_client import (
     KalshiClient,
@@ -105,6 +106,7 @@ class PaperBot:
         self.cfb: dict[str, object] = {}
         self.risk.restore_persisted_kill()
         self._sync_kill_flags()
+        self.hitl = HitlDesk(settings)
 
     def stop(self) -> None:
         self._stop.set()
@@ -136,6 +138,9 @@ class PaperBot:
             improve_ticks=self.settings.improve_ticks,
             only_quote_underround=self.settings.only_quote_underround,
             kelly_max=str(self.settings.kelly_max),
+            desk_mode=self.settings.desk_mode,
+            hitl_timeout_s=self.settings.hitl_timeout_seconds,
+            allow_production=self.settings.allow_production,
             clip=str(self.settings.clip),
             settle_recycle_s=self.settings.effective_settle_recycle_seconds,
             settle_rare_tail=self.settings.settle_rare_tail,
@@ -375,15 +380,19 @@ class PaperBot:
                 # Do not account-wide-cancel an unverified production book.
                 self.execution.cancel_all()
                 snapshot = self.portfolio.snapshot(books)
+            self.hitl.note_reason(self.risk.kill_reason or "kill")
 
         submitted: list[QuoteIntent] = []
+        aged_tickers: set[str] = set()
+        self.hitl.expire(now)
+        snapshot = self._flush_approved_hitl(snapshot, books, now, submitted, aged_tickers)
 
         for market in self.universe.flatten_only(now=now):
             flat = self._flatten_window(market, snapshot, now, reason="last_60s_flatten_unpaired")
             if flat:
                 submitted.append(flat)
+                self.hitl.note_reason("last_60s_flatten_unpaired", ticker=market.ticker, now=now)
 
-        aged_tickers: set[str] = set()
         for market in self._aged_unpaired_markets(snapshot, now):
             aged_tickers.add(market.ticker)
             pos = snapshot.positions.get(market.ticker)
@@ -395,6 +404,7 @@ class PaperBot:
             flat = self._flatten_window(market, snapshot, now, reason=reason)
             if flat:
                 submitted.append(flat)
+                self.hitl.note_reason(reason, ticker=market.ticker, now=now)
             snapshot = self.portfolio.snapshot(books)
 
         if should_abort_open(snapshot, self.settings):
@@ -409,6 +419,7 @@ class PaperBot:
             snapshot = self.portfolio.snapshot(books)
             for intent in contained:
                 aged_tickers.add(intent.market_ticker)
+                self.hitl.note_reason("open_notional_abort", ticker=intent.market_ticker, now=now)
 
         if self.risk.kill_active or not ready:
             emit_metrics(compute_metrics(self.settings, self.portfolio, snapshot))
@@ -427,7 +438,43 @@ class PaperBot:
                     self.execution.cancel_market(
                         market.ticker, market.event_ticker, intent.reason or "unpaired_abort"
                     )
+                    self.hitl.note_reason(
+                        intent.reason or "unpaired_abort", ticker=market.ticker, now=now
+                    )
                 elif self._already_quoting(intent):
+                    continue
+                if self.hitl.blocks_new_risk(intent):
+                    log.info(
+                        "risk_reject",
+                        reason=RejectReason.HITL_BLOCK.value
+                        if self.hitl.is_hitl()
+                        else RejectReason.KILL_SWITCH.value,
+                        detail="LIVE_BLOCKED" if self.hitl.is_live_blocked() else "HITL_BLOCK",
+                        ticker=intent.market_ticker,
+                        outcome=intent.outcome.value,
+                        kind=intent.kind.value,
+                    )
+                    continue
+                if self.hitl.requires_approval(intent):
+                    decision = self.risk.evaluate(
+                        intent, snapshot, close_time=market.close_time, now=now
+                    )
+                    if not decision.allowed:
+                        log.info(
+                            "risk_reject",
+                            reason=decision.reason.value,
+                            detail=decision.detail,
+                            ticker=intent.market_ticker,
+                            outcome=intent.outcome.value,
+                            kind=intent.kind.value,
+                        )
+                        continue
+                    self.hitl.offer(
+                        intent,
+                        snapshot,
+                        bid_sum=book.bid_sum(),
+                        now=now,
+                    )
                     continue
                 decision = self.risk.evaluate(
                     intent, snapshot, close_time=market.close_time, now=now
@@ -466,6 +513,79 @@ class PaperBot:
     def _publish_hud(self, now: datetime) -> None:
         if self.hud_hub is not None:
             self.hud_hub.publish(build_snapshot(self, self.mid_history, now))
+
+    def _flush_approved_hitl(
+        self,
+        snapshot,
+        books: dict,
+        now: datetime,
+        submitted: list[QuoteIntent],
+        aged_tickers: set[str],
+    ):
+        for item in self.hitl.take_approved():
+            market = self.universe.markets.get(item.market_ticker)
+            if market is None:
+                for candidate in self.universe.markets.values():
+                    if candidate.event_ticker == item.event_ticker:
+                        market = candidate
+                        break
+            book = self.books.get(item.market_ticker)
+            if market is None or book is None:
+                continue
+            committed = self._commit_intent(item.quote, market, book, snapshot, now)
+            if committed:
+                submitted.append(committed)
+                snapshot = self.portfolio.snapshot(books)
+        return snapshot
+
+    def apply_hitl_decision(
+        self,
+        intent_id: str,
+        decision: str,
+        *,
+        now: datetime | None = None,
+    ):
+        """Apply HUD POST /v0/hitl/{id} and submit immediately on approve."""
+        now = now or datetime.now(UTC)
+        record = self.hitl.decide(intent_id, decision, actor="user", now=now)
+        books = {
+            t: b
+            for t, b in (
+                (m.ticker, self.books.get(m.ticker)) for m in self.universe.markets.values()
+            )
+            if b
+        }
+        snapshot = self.portfolio.snapshot(books)
+        submitted: list[QuoteIntent] = []
+        snapshot = self._flush_approved_hitl(snapshot, books, now, submitted, set())
+        self._publish_hud(now)
+        return record, submitted
+
+    def _commit_intent(
+        self,
+        intent: QuoteIntent,
+        market: MarketWindow,
+        book: OrderBook,
+        snapshot,
+        now: datetime,
+    ) -> QuoteIntent | None:
+        if self._already_quoting(intent) and intent.kind is not IntentKind.FLATTEN:
+            return None
+        decision = self.risk.evaluate(intent, snapshot, close_time=market.close_time, now=now)
+        if not decision.allowed:
+            log.info(
+                "risk_reject",
+                reason=decision.reason.value,
+                detail=decision.detail,
+                ticker=intent.market_ticker,
+                outcome=intent.outcome.value,
+                kind=intent.kind.value,
+            )
+            return None
+        result = self.execution.submit(intent, book=book)
+        if result.get("rejected"):
+            return None
+        return intent
 
     def _apply_lifecycle_result(self, body: dict) -> None:
         ticker = str(body.get("market_ticker") or body.get("ticker") or "")

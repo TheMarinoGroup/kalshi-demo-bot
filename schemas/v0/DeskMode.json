@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://themarinogroup.github.io/kalshi-demo-bot/schemas/v0/DeskMode.json",
+  "title": "DeskMode",
+  "description": "Dig6 MM frozen stub. LIVE is unreachable; LIVE_BLOCKED has no unlock path.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["desk_lane", "mode", "paper", "profile", "bankroll"],
+  "properties": {
+    "desk_lane": { "type": "string", "const": "MM" },
+    "mode": {
+      "type": "string",
+      "enum": ["PAPER", "HITL", "LIVE_BLOCKED"]
+    },
+    "paper": { "type": "boolean", "const": true },
+    "profile": { "type": "string", "const": "dig6_tight" },
+    "bankroll": { "type": "string", "minLength": 1 }
+  }
+}

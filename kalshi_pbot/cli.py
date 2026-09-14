@@ -198,6 +198,12 @@ def status() -> None:
     )
     typer.echo(f"only_underround  {settings.only_quote_underround}")
     typer.echo(f"kelly_max        {settings.kelly_max}  (size ≤ this fraction of bankroll)")
+    typer.echo(
+        f"desk_mode        {settings.desk_mode}  "
+        "(PAPER auto / HITL approvals; LIVE → LIVE_BLOCKED, no unlock)"
+    )
+    typer.echo(f"hitl_timeout_s   {settings.hitl_timeout_seconds}")
+    typer.echo(f"allow_production {settings.allow_production}  (must stay false on this desk)")
     typer.echo(f"last_seconds     {settings.last_seconds}  (Risk Desk floor 60s)")
     typer.echo(
         f"settle_recycle   {settings.effective_settle_recycle_seconds}s  "

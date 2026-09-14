@@ -64,8 +64,19 @@ def _asset_key(ticker: str) -> str:
 
 def _mode_block(settings: Settings) -> dict[str, Any]:
     live_prod = bool(settings.live_submit and settings.env == "production")
-    hard_stop = live_prod and not settings.allow_production
-    badge = "LIVE" if live_prod else "PAPER"
+    desk = str(getattr(settings, "desk_mode", "PAPER") or "PAPER").upper()
+    if desk in {"LIVE", "LIVE_BLOCKED"}:
+        desk = "LIVE_BLOCKED"
+    live_prod_hard = live_prod and not settings.allow_production
+    hard_stop = live_prod_hard or desk == "LIVE_BLOCKED"
+    if desk == "HITL":
+        badge = "HITL"
+    elif desk == "LIVE_BLOCKED":
+        badge = "LIVE_BLOCKED"
+    elif live_prod:
+        badge = "LIVE"
+    else:
+        badge = "PAPER"
     return {
         "env": settings.env,
         "dry_run": settings.dry_run,
@@ -75,9 +86,13 @@ def _mode_block(settings: Settings) -> dict[str, Any]:
         "mock": settings.mock,
         "latency_ms": settings.latency_ms,
         "badge": badge,
-        "paper_only": badge == "PAPER",
+        "paper_only": badge in {"PAPER", "HITL"},
         "hard_stop": hard_stop,
         "demo_submit": bool(settings.live_submit and settings.env != "production"),
+        "desk_mode": desk if desk in {"PAPER", "HITL", "LIVE_BLOCKED"} else "PAPER",
+        "desk_lane": "MM",
+        "profile": "dig6_tight",
+        "paper": True,
     }
 
 
@@ -572,6 +587,28 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
     )
 
     band = list(SETTLE_RECYCLE_BAND)
+    hitl = getattr(bot, "hitl", None)
+    hitl_state = hitl.state_payload() if hitl is not None else {
+        "desk_mode": {
+            "desk_lane": "MM",
+            "mode": "PAPER",
+            "paper": True,
+            "profile": "dig6_tight",
+            "bankroll": str(settings.bankroll),
+        },
+        "hitl_queue": [],
+        "bus_events": [],
+        "allow_production": bool(settings.allow_production),
+        "size": {
+            "lane": "MM",
+            "family_d": False,
+            "scale_in": {"accepted": False, "blocked_by": "LANE_MM"},
+            "kelly_max": float(getattr(settings, "kelly_max", 0.25)),
+            "note": "Family D / scale_in blocked_by=LANE_MM — no SCALE path",
+        },
+        "hitl_timeout_s": int(getattr(settings, "hitl_timeout_seconds", 60) or 60),
+        "blocked_by_scale_in": "LANE_MM",
+    }
     return {
         "v": 3,
         "ts": _iso(now),
@@ -649,6 +686,8 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
             "taker_fills": taker_fills,
             "mix": _mix(port),
             "quote_mode": settings.quote_mode,
+            "family_d": False,
+            "scale_in_blocked_by": "LANE_MM",
         },
         "pnl": {
             "realized": _f(metrics.realized_pnl),
@@ -678,4 +717,10 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
         "resting": resting,
         "fills": fills,
         "series": list(settings.series_tickers),
+        "desk_mode": hitl_state["desk_mode"],
+        "hitl_queue": hitl_state["hitl_queue"],
+        "bus_events": hitl_state["bus_events"],
+        "size": hitl_state["size"],
+        "allow_production": hitl_state["allow_production"],
+        "hitl_timeout_s": hitl_state.get("hitl_timeout_s", 60),
     }
