@@ -20,6 +20,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol
 
+import httpx
 import structlog
 
 from kalshi_pbot.config import Settings
@@ -143,6 +144,12 @@ def may_cancel_orphans(settings: Settings) -> bool:
             allow_production=settings.allow_production,
         )
         return False
+    if settings.is_prod_url(settings.resolved_portfolio_rest):
+        log.warning(
+            "cancel_orphans_refused_production_portfolio",
+            portfolio_rest=settings.resolved_portfolio_rest,
+        )
+        return False
     if not settings.live_submit:
         log.info("cancel_orphans_ignored_not_demo_submit")
         return False
@@ -158,6 +165,26 @@ def is_watched_ticker(
         return True
     upper = ticker.upper()
     return any(upper.startswith(series.upper()) for series in series_tickers)
+
+
+def format_reconcile_error(exc: BaseException, settings: Settings) -> str:
+    """Human-readable fail-closed reason. 401s call out credential/host mismatch."""
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    request = getattr(exc, "request", None)
+    url = str(getattr(request, "url", "") or "")
+    if status == 401 or (
+        isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 401
+    ):
+        host = url or settings.resolved_portfolio_rest
+        return (
+            "401 Unauthorized: auth/host mismatch — credentials were rejected by "
+            f"{host}. Reconcile-read host is {settings.resolved_portfolio_rest} "
+            f"(ws_env={settings.ws_env}, allow_prod_ws={int(settings.allow_prod_ws)}); "
+            f"order-write host is {settings.resolved_order_rest}. "
+            "View-only production keys must reconcile against production REST "
+            "(KALSHI_WS_ENV=production and KALSHI_ALLOW_PROD_WS=1), not demo."
+        )
+    return f"{type(exc).__name__}: {exc}"
 
 
 def _parse_ts(value: object) -> datetime | None:
@@ -546,9 +573,11 @@ class Reconciler:
         execution: ExecutionEngine | None = None,
         universe: Any | None = None,
         mock: bool = False,
+        order_rest: PortfolioRest | None = None,
     ) -> None:
         self.settings = settings
         self.rest = rest
+        self.order_rest = order_rest
         self.portfolio = portfolio
         self.tape = tape
         self.execution = execution
@@ -583,11 +612,13 @@ class Reconciler:
             paper_tape=self.settings.paper_tape,
             live_submit=self.settings.live_submit,
             has_rest=self.rest is not None,
+            portfolio_rest=self.settings.resolved_portfolio_rest,
+            order_rest=self.settings.resolved_order_rest,
         )
         try:
             snapshot, skipped = self._fetch_snapshot(now)
         except Exception as exc:
-            return self._fail(now, f"{type(exc).__name__}: {exc}")
+            return self._fail(now, format_reconcile_error(exc, self.settings))
 
         event_lookup = self._event_lookup()
         live = self._live_tickers()
@@ -746,10 +777,11 @@ class Reconciler:
         parsed_orders: list[RestingOrder],
     ) -> tuple[int, list[RestingOrder]]:
         assert self.rest is not None
+        writer = self.order_rest or self.rest
         cancelled_ids: set[str] = set()
         for order in orphans:
             try:
-                response = self.rest.cancel_order(order.order_id, order.market_ticker)
+                response = writer.cancel_order(order.order_id, order.market_ticker)
                 status = getattr(response, "status_code", 200)
                 if status in {200, 204}:
                     cancelled_ids.add(order.order_id)

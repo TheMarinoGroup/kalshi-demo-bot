@@ -17,6 +17,7 @@ def test_defaults_are_paper_data_plane() -> None:
     assert settings.live_submit is False
     assert settings.resolved_data_rest == PROD_REST
     assert settings.resolved_rest_base == PROD_REST
+    assert settings.resolved_portfolio_rest == DEMO_REST
     assert settings.resolved_order_rest == DEMO_REST
     assert settings.resolved_ws_url == DEMO_WS
     assert settings.latency_ms == 150
@@ -67,6 +68,36 @@ def test_prod_ws_allowed_readonly() -> None:
     settings = Settings(ws_url=PROD_WS, allow_prod_ws=True)
     assert settings.resolved_ws_url == PROD_WS
     assert settings.live_submit is False
+    assert settings.resolved_portfolio_rest == PROD_REST
+    assert settings.resolved_order_rest == DEMO_REST
+    assert settings.allow_production is False
+
+
+def test_prod_read_credentials_use_prod_portfolio_demo_order_plane() -> None:
+    settings = Settings(
+        env="demo",
+        ws_env="production",
+        allow_prod_ws=True,
+        allow_production=False,
+    )
+    assert settings.resolved_data_rest == PROD_REST
+    assert settings.resolved_portfolio_rest == PROD_REST
+    assert settings.resolved_order_rest == DEMO_REST
+    assert settings.resolved_ws_url == PROD_WS
+    with pytest.raises(ValueError, match="production order host"):
+        Settings(
+            env="demo",
+            ws_env="production",
+            allow_prod_ws=True,
+            order_rest=PROD_REST,
+        )
+
+
+def test_portfolio_rest_override_does_not_enable_order_prod() -> None:
+    settings = Settings(portfolio_rest=PROD_REST)
+    assert settings.resolved_portfolio_rest == PROD_REST
+    assert settings.resolved_order_rest == DEMO_REST
+    assert settings.allow_production is False
 
 
 def test_latency_must_be_bucket() -> None:

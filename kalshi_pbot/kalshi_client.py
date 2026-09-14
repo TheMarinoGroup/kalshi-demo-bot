@@ -431,10 +431,12 @@ class KalshiRestClient:
                 "paper-tape / dry-run: POST /portfolio/events/orders is disabled"
             )
         if self.purpose != "order":
-            raise RuntimeError("create_order must use the demo order REST client")
+            raise RuntimeError("create_order must use the order-write REST client")
+        self._assert_order_write_allowed()
         return self.request("POST", "/portfolio/events/orders", json_body=body)
 
     def cancel_order(self, order_id: str, market_ticker: str) -> httpx.Response:
+        self._assert_order_write_allowed()
         return self.request(
             "DELETE",
             f"/portfolio/events/orders/{order_id}",
@@ -442,7 +444,17 @@ class KalshiRestClient:
         )
 
     def cancel_all_orders(self) -> httpx.Response:
+        self._assert_order_write_allowed()
         return self.request("DELETE", "/portfolio/events/orders")
+
+    def _assert_order_write_allowed(self) -> None:
+        if self.purpose != "order":
+            raise RuntimeError("order writes must use the order-write REST client")
+        if self.settings.is_prod_url(self.base_url) and not self.settings.allow_production:
+            raise RuntimeError(
+                f"Refusing production order POST/DELETE on {self.base_url!r} "
+                "without KALSHI_ALLOW_PRODUCTION=1"
+            )
 
 
 _DEAD_STATUSES = {"closed", "settled", "finalized", "determined"}
@@ -647,13 +659,19 @@ class KalshiWebSocket:
 
 
 class KalshiClient:
-    """Facade: public prod data REST + optional auth WS + demo order REST."""
+    """Facade: public data REST + auth portfolio-read REST + order-write REST + WS."""
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         key = load_private_key(settings) if settings.has_credentials() else None
         self.data = KalshiRestClient(
             settings, base_url=settings.resolved_data_rest, purpose="data"
+        )
+        self.portfolio_rest = KalshiRestClient(
+            settings,
+            base_url=settings.resolved_portfolio_rest,
+            private_key=key,
+            purpose="portfolio",
         )
         self.rest = KalshiRestClient(
             settings,
@@ -665,6 +683,7 @@ class KalshiClient:
 
     def close(self) -> None:
         self.data.close()
+        self.portfolio_rest.close()
         self.rest.close()
 
     def get_series(self, series_ticker: str) -> SeriesMeta:

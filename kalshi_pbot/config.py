@@ -1,13 +1,17 @@
 """Environment and Risk Desk v1 configuration.
 
-Two planes:
+Three hosts:
 
 * **Data** — public prod REST (no key) for events/books. Research default.
+* **Reconcile-read** — authenticated portfolio GETs (positions, orders, fills,
+  settlements). Follows WS / credential env so view-only prod keys with
+  ``KALSHI_WS_ENV=production`` + ``KALSHI_ALLOW_PROD_WS=1`` hit production REST.
 * **Orders** — demo only. Paper-tape / matcher never POST. ``--demo-submit``
   is the only path that may hit ``POST /portfolio/events/orders``.
 
 Production *order* hosts stay refused unless ``KALSHI_ALLOW_PRODUCTION=1``.
-Read-only prod WebSocket is opt-in via ``KALSHI_ALLOW_PROD_WS=1``.
+Read-only prod WebSocket is opt-in via ``KALSHI_ALLOW_PROD_WS=1`` and does
+**not** enable production order POST.
 """
 
 from __future__ import annotations
@@ -81,6 +85,7 @@ class Settings(BaseSettings):
     allow_prod_ws: bool = False
     rest_base: str | None = None  # legacy alias for data_rest
     data_rest: str | None = None
+    portfolio_rest: str | None = None  # authenticated reconcile-read GETs
     order_rest: str | None = None
     ws_url: str | None = None
     ws_env: Literal["demo", "production"] = "demo"
@@ -243,6 +248,15 @@ class Settings(BaseSettings):
         return raw.rstrip("/")
 
     @cached_property
+    def resolved_portfolio_rest(self) -> str:
+        """Authenticated portfolio GETs. Matches WS / credential env, not order POST."""
+        if self.portfolio_rest:
+            return self.portfolio_rest.rstrip("/")
+        if self.ws_env == "production" or self.allow_prod_ws or self.env == "production":
+            return PROD_REST
+        return DEMO_REST
+
+    @cached_property
     def resolved_order_rest(self) -> str:
         raw = (self.order_rest or DEMO_REST).rstrip("/")
         self._assert_order_url_safe(raw)
@@ -275,6 +289,9 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"Refusing production order host {url!r} without KALSHI_ALLOW_PRODUCTION=1"
             )
+
+    def is_prod_url(self, url: str) -> bool:
+        return self._is_prod_host(url)
 
     def _assert_ws_url_safe(self, url: str) -> None:
         if self._is_prod_host(url) and not (self.allow_prod_ws or self.allow_production):
