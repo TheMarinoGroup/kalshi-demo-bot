@@ -20,7 +20,9 @@ from kalshi_pbot.reconcile import (
     STATUS_READY,
     STATUS_SYNCING,
     Reconciler,
+    demo_prod_credential_hint,
     may_cancel_orphans,
+    requires_exchange_snapshot,
 )
 from kalshi_pbot.risk_engine import RiskEngine, classify_kill
 from kalshi_pbot.runner import PaperBot
@@ -57,13 +59,16 @@ class FakeRest:
         self.created_orders: list[dict] = []
         self.fill_min_ts: int | None = None
         self.settlement_min_ts: int | None = None
+        self.calls: list[str] = []
 
     def list_market_positions(self) -> list[dict]:
+        self.calls.append("positions")
         if self.error:
             raise self.error
         return list(self.positions)
 
     def list_resting_orders(self) -> list[dict]:
+        self.calls.append("orders")
         if self.error:
             raise self.error
         if self.fail_orders:
@@ -71,6 +76,7 @@ class FakeRest:
         return list(self.orders)
 
     def list_fills_since(self, min_ts: int) -> list[dict]:
+        self.calls.append("fills")
         if self.error:
             raise self.error
         if self.fail_fills:
@@ -79,6 +85,7 @@ class FakeRest:
         return list(self.fills)
 
     def list_settlements_since(self, min_ts: int) -> list[dict]:
+        self.calls.append("settlements")
         if self.error:
             raise self.error
         if self.fail_settlements:
@@ -104,6 +111,28 @@ def _settings(**kwargs: object) -> Settings:
     }
     defaults.update(kwargs)
     return Settings(**defaults)
+
+
+def _live_settings(**kwargs: object) -> Settings:
+    """Armed demo-submit / live_submit path — must refuse-until-synced."""
+    defaults: dict[str, object] = {
+        "dry_run": False,
+        "paper_tape": False,
+        "mock": False,
+        "series": "KXBTC15M",
+    }
+    defaults.update(kwargs)
+    return Settings(**defaults)
+
+
+def _auth_error(
+    url: str = "https://external-api.demo.kalshi.co/trade-api/v2/portfolio/positions",
+) -> httpx.HTTPStatusError:
+    return httpx.HTTPStatusError(
+        "401",
+        request=httpx.Request("GET", url),
+        response=httpx.Response(401, json={"error": "unauthorized"}),
+    )
 
 
 def _yes_position(
@@ -273,22 +302,96 @@ def _paper_bot(**kwargs: object) -> PaperBot:
     return bot
 
 
+def test_requires_exchange_snapshot_paper_vs_live() -> None:
+    paper = _settings()
+    assert paper.live_submit is False
+    assert requires_exchange_snapshot(paper) is False
+    assert requires_exchange_snapshot(paper, mock=True) is False
+    live = _live_settings()
+    assert live.live_submit is True
+    assert requires_exchange_snapshot(live) is True
+    assert requires_exchange_snapshot(live, mock=True) is False
+    dry_no_tape = _settings(paper_tape=False, dry_run=True)
+    assert dry_no_tape.live_submit is False
+    assert requires_exchange_snapshot(dry_no_tape) is True
+
+
+def test_demo_prod_credential_hint_once_on_paper_mismatch() -> None:
+    paper_prod_ws = _settings(
+        ws_env="production",
+        allow_prod_ws=True,
+        api_key_id="view-only-prod",
+        private_key="-----BEGIN PLACEHOLDER-----\n",
+    )
+    hint = demo_prod_credential_hint(paper_prod_ws)
+    assert hint is not None
+    assert "Demo REST needs demo API keys" in hint
+    assert "paper_tape skips exchange portfolio" in hint
+    assert demo_prod_credential_hint(_settings()) is None
+    live_prod_ws = _live_settings(ws_env="production", allow_prod_ws=True)
+    assert demo_prod_credential_hint(live_prod_ws) is None
+
+
 def test_empty_exchange_snapshot_marks_paper_ready() -> None:
     settings = _settings()
-    rec = _reconciler(settings, FakeRest([], []))
+    rest = FakeRest([], [])
+    rec = _reconciler(settings, rest)
     state = rec.attempt()
     assert state.ready_to_trade is True
     assert state.status == STATUS_READY
     assert state.source == SOURCE_PAPER_LOCAL
     assert rec.portfolio.ready_to_trade is True
+    assert rest.calls == []
     snap = rec.portfolio.snapshot()
     assert snap.open_notional == 0
     assert snap.unpaired_notional == 0
     assert snap.resting == ()
 
 
-def test_open_position_rebuilds_onesided_and_open() -> None:
+def test_paper_tape_dry_run_ready_with_empty_snapshot_despite_401() -> None:
     settings = _settings()
+    rest = FakeRest(error=_auth_error())
+    rec = _reconciler(settings, rest)
+    engine = ExecutionEngine(settings, rec.portfolio)
+    rec.execution = engine
+    state = rec.attempt()
+    assert state.ready_to_trade is True
+    assert state.status == STATUS_READY
+    assert state.source == SOURCE_PAPER_LOCAL
+    assert rest.calls == []
+    assert rec.portfolio.positions == {}
+    assert rec.portfolio.resting == {}
+    assert rec.portfolio.ready_to_trade is True
+    assert engine.ready_to_trade is True
+    hud = rec.state.as_hud(cancel_orphans=False)
+    assert hud["hard_hold"] is False
+    assert hud["book_verified"] is True
+    result = engine.submit(_entry_intent())
+    assert result.get("error") != "not_ready"
+
+
+def test_paper_tape_ignores_exchange_inventory() -> None:
+    rest = FakeRest([_yes_position()], [_resting_order()])
+    rec = _reconciler(_settings(), rest)
+    rec.attempt()
+    assert rec.state.source == SOURCE_PAPER_LOCAL
+    assert rec.state.ready_to_trade is True
+    assert rec.portfolio.positions == {}
+    assert rec.portfolio.resting == {}
+    assert rest.calls == []
+
+
+def test_live_submit_without_rest_fail_closed() -> None:
+    rec = _reconciler(_live_settings(), None)
+    state = rec.attempt()
+    assert state.ready_to_trade is False
+    assert state.status == STATUS_NOT_READY
+    assert rec.portfolio.ready_to_trade is False
+    assert "authenticated REST" in state.error
+
+
+def test_open_position_rebuilds_onesided_and_open() -> None:
+    settings = _live_settings()
     rec = _reconciler(settings, FakeRest([_yes_position()], []))
     rec.attempt()
     assert rec.state.source == SOURCE_EXCHANGE_SYNC
@@ -303,7 +406,7 @@ def test_open_position_rebuilds_onesided_and_open() -> None:
 
 
 def test_resting_orders_restored_into_portfolio() -> None:
-    settings = _settings()
+    settings = _live_settings()
     rec = _reconciler(settings, FakeRest([], [_resting_order()]))
     rec.attempt()
     assert rec.state.source == SOURCE_EXCHANGE_SYNC
@@ -317,13 +420,8 @@ def test_resting_orders_restored_into_portfolio() -> None:
 
 
 def test_api_error_fail_closed_no_quotes() -> None:
-    settings = _settings()
-    err = httpx.HTTPStatusError(
-        "401",
-        request=httpx.Request("GET", "https://api.test/portfolio/positions"),
-        response=httpx.Response(401, json={"error": "unauthorized"}),
-    )
-    rec = _reconciler(settings, FakeRest(error=err))
+    settings = _live_settings()
+    rec = _reconciler(settings, FakeRest(error=_auth_error()))
     engine = ExecutionEngine(settings, rec.portfolio)
     rec.execution = engine
     state = rec.attempt()
@@ -354,6 +452,8 @@ def test_api_error_fail_closed_no_quotes() -> None:
     )
     assert result["error"] == "not_ready"
     assert engine.dry_run_orders == []
+    assert isinstance(rec.rest, FakeRest)
+    assert rec.rest.calls
     hud = rec.state.as_hud(cancel_orphans=False)
     assert hud["hard_hold"] is True
     assert hud["book_verified"] is False
@@ -364,7 +464,7 @@ def test_api_error_fail_closed_no_quotes() -> None:
 
 
 def test_partial_orders_failure_fail_closed() -> None:
-    settings = _settings()
+    settings = _live_settings()
     rec = _reconciler(settings, FakeRest([_yes_position()], fail_orders=True))
     state = rec.attempt()
     assert state.status == STATUS_NOT_READY
@@ -374,7 +474,7 @@ def test_partial_orders_failure_fail_closed() -> None:
 
 
 def test_backoff_skips_until_retry_ts() -> None:
-    settings = _settings()
+    settings = _live_settings()
     rec = _reconciler(settings, FakeRest(error=RuntimeError("network down")))
     first = rec.attempt(datetime(2026, 9, 14, 12, 0, tzinfo=UTC))
     assert first.status == STATUS_NOT_READY
@@ -429,7 +529,7 @@ def test_paper_local_rebuilds_from_tape(tmp_path) -> None:
 
 def test_exchange_occupied_skips_tape(tmp_path) -> None:
     tape_path = tmp_path / "tape.jsonl"
-    settings = _settings(tape_path=str(tape_path))
+    settings = _live_settings(tape_path=str(tape_path))
     tape = JsonlTape(tape_path)
     tape.write(
         "paper_fill",
@@ -638,7 +738,7 @@ def test_pagination_overflow_fail_closed() -> None:
 
 
 def test_exchange_snapshot_rebuilds_daily_pnl_from_blotter() -> None:
-    settings = _settings()
+    settings = _live_settings()
     now = datetime(2026, 9, 14, 12, 30, tzinfo=UTC)
     rest = FakeRest(
         [_yes_position(qty="20.00", exposure="10.0000", realized="-4.0000", fees="0.5000")],
@@ -673,7 +773,7 @@ def test_exchange_snapshot_rebuilds_daily_pnl_from_blotter() -> None:
 
 
 def test_settled_same_day_loss_trips_daily_kill_on_restart() -> None:
-    settings = _settings()
+    settings = _live_settings()
     now = datetime(2026, 9, 14, 12, 30, tzinfo=UTC)
     rec = _reconciler(
         settings,
@@ -703,7 +803,7 @@ def test_settled_same_day_loss_trips_daily_kill_on_restart() -> None:
 
 
 def test_bad_price_resting_fail_closed() -> None:
-    settings = _settings()
+    settings = _live_settings()
     bad = _resting_order()
     bad["yes_price_dollars"] = "0"
     bad["no_price_dollars"] = "0"
@@ -720,7 +820,7 @@ def test_bad_price_resting_fail_closed() -> None:
 
 
 def test_fills_endpoint_failure_fail_closed() -> None:
-    settings = _settings()
+    settings = _live_settings()
     rec = _reconciler(settings, FakeRest([_yes_position()], [], fail_fills=True))
     state = rec.attempt()
     assert state.status == STATUS_NOT_READY
@@ -729,7 +829,7 @@ def test_fills_endpoint_failure_fail_closed() -> None:
 
 
 def test_unparseable_fill_fail_closed() -> None:
-    settings = _settings()
+    settings = _live_settings()
     bad = _fill()
     bad["yes_price_dollars"] = "0"
     bad["no_price_dollars"] = "0"
@@ -740,7 +840,7 @@ def test_unparseable_fill_fail_closed() -> None:
 
 
 def test_rebuilt_state_still_enforces_option_b_caps() -> None:
-    settings = _settings()
+    settings = _live_settings()
     rec = _reconciler(
         settings,
         FakeRest([_yes_position(qty="50.00", exposure="25.0000")], []),
@@ -770,7 +870,7 @@ def test_rebuilt_state_still_enforces_option_b_caps() -> None:
         liquidity=Liquidity.MAKER,
         kind=IntentKind.ENTRY,
     )
-    clip = engine.evaluate(tiny, empty_snapshot(settings), close_time=close, now=now)
+    clip = RiskEngine(settings).evaluate(tiny, empty_snapshot(settings), close_time=close, now=now)
     assert clip.allowed is False
     assert clip.reason is RejectReason.PER_FILL
     flatten = engine.evaluate(_flatten_intent(), snap, close_time=close, now=now)
@@ -778,7 +878,7 @@ def test_rebuilt_state_still_enforces_option_b_caps() -> None:
 
 
 def test_fail_closed_hard_hold_never_silent_empty_book() -> None:
-    bot = _paper_bot()
+    bot = _paper_bot(paper_tape=False, dry_run=False)
     rest = FakeRest(error=RuntimeError("network down"))
     bot.reconcile.mock = False
     bot.reconcile.rest = rest  # type: ignore[assignment]
@@ -796,7 +896,7 @@ def test_fail_closed_hard_hold_never_silent_empty_book() -> None:
 
 
 def test_rebuilt_over_soft_onesided_flattens_after_sync() -> None:
-    bot = _paper_bot()
+    bot = _paper_bot(paper_tape=False, dry_run=False)
     ticker = next(iter(bot.universe.markets))
     rest = FakeRest([_yes_position(ticker, qty="40.00", exposure="20.0000")], [])
     bot.reconcile.mock = False
@@ -810,7 +910,7 @@ def test_rebuilt_over_soft_onesided_flattens_after_sync() -> None:
 
 
 def test_rebuilt_aged_unpaired_still_aborts() -> None:
-    bot = _paper_bot()
+    bot = _paper_bot(paper_tape=False, dry_run=False)
     ticker = next(iter(bot.universe.markets))
     now = datetime.now(UTC)
     aged = (now - timedelta(seconds=46)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -868,7 +968,7 @@ def test_paper_reconcile_never_posts_and_allow_production_stays_off() -> None:
 
 
 def test_prod_read_reconcile_hits_prod_portfolio_urls_not_demo_order() -> None:
-    settings = _settings(
+    settings = _live_settings(
         env="demo",
         ws_env="production",
         allow_prod_ws=True,
@@ -977,5 +1077,10 @@ def test_paper_bot_wires_prod_portfolio_read_and_demo_order_write() -> None:
         assert bot.execution.rest.base_url == DEMO_REST
         assert bot.settings.allow_production is False
         assert bot.execution.live_submit is False
+        state = bot.reconcile.attempt()
+        assert state.ready_to_trade is True
+        assert state.status == STATUS_READY
+        assert state.source == SOURCE_PAPER_LOCAL
+        assert state.error == ""
     finally:
         bot.client.close()
