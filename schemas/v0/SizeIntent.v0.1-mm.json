@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://themarinogroup.github.io/kalshi-demo-bot/schemas/v0/SizeIntent.v0.1-mm.json",
+  "title": "SizeIntent",
+  "description": "Dig6 MM SizeIntent/v0.1-mm. No scale_in. Family D / SCALE is blocked_by=LANE_MM. kelly_frac ≤ 0.25 is informational.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["intent_id", "desk_lane", "mode", "ticker", "side"],
+  "properties": {
+    "intent_id": { "type": "string", "minLength": 1 },
+    "desk_lane": { "type": "string", "const": "MM" },
+    "mode": {
+      "type": "string",
+      "enum": ["entry", "complete_only", "reduce_only", "flat"]
+    },
+    "ticker": { "type": "string", "minLength": 1 },
+    "side": { "type": "string", "enum": ["yes", "no"] },
+    "clip": { "type": "string" },
+    "count": { "type": "string" },
+    "price": { "type": "string" },
+    "kelly_frac": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 0.25
+    },
+    "edge": { "type": ["number", "null"] },
+    "p_star": { "type": ["number", "null"] },
+    "projected_open": { "type": "string" },
+    "projected_onesided": { "type": "string" },
+    "projected_day_pnl": { "type": "string" },
+    "kill_headroom": { "type": "string" },
+    "blocked_by": { "type": ["string", "null"] },
+    "ts": { "type": "string", "format": "date-time" }
+  }
+}

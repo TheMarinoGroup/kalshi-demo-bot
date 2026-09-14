@@ -49,6 +49,8 @@ class RejectReason(StrEnum):
     UNPAIRED_EXISTS = "unpaired_exists"
     NOT_READY = "not_ready"
     INVALID = "invalid"
+    HITL_BLOCK = "hitl_block"
+    LANE_MM = "lane_mm"
     KELLY_CAP = "kelly_cap"
 
 

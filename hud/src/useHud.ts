@@ -16,6 +16,7 @@ export function useHud(): {
   live: boolean;
   clock: Date;
   tripKill: () => Promise<void>;
+  decideHitl: (intentId: string, decision: "approve" | "deny") => Promise<void>;
 } {
   const [snap, setSnap] = useState<HudSnapshot | null>(null);
   const [live, setLive] = useState(false);
@@ -90,5 +91,20 @@ export function useHud(): {
     }
   }, []);
 
-  return { snap, live, clock, tripKill };
+  const decideHitl = useCallback(async (intentId: string, decision: "approve" | "deny") => {
+    const res = await fetch(`/v0/hitl/${intentId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decision }),
+    });
+    if (res.ok) {
+      const snapRes = await fetch("/api/snapshot");
+      if (snapRes.ok) {
+        const data = (await snapRes.json()) as HudSnapshot;
+        setSnap(decorate(data));
+      }
+    }
+  }, [decorate]);
+
+  return { snap, live, clock, tripKill, decideHitl };
 }

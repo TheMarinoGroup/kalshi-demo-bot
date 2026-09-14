@@ -41,6 +41,8 @@ def test_defaults_are_paper_data_plane() -> None:
     assert settings.taker_pair_arb is False
     assert settings.only_quote_underround is True
     assert settings.kelly_max == Decimal("0.25")
+    assert settings.desk_mode == "PAPER"
+    assert settings.hitl_timeout_seconds == 60
     assert settings.cancel_orphans is False
     assert settings.kill_latch_path.endswith("kill-latch.json")
 
@@ -58,6 +60,8 @@ def test_paper_defaults_unchanged_when_allow_production_false() -> None:
     assert settings.min_edge == Decimal("0.04")
     assert settings.only_quote_underround is True
     assert settings.kelly_max == Decimal("0.25")
+    assert settings.desk_mode == "PAPER"
+    assert settings.allow_production is False
     assert settings.last_seconds == 120
     assert settings.soft_onesided == Decimal("10")
     assert settings.max_unpaired_age_seconds == 45

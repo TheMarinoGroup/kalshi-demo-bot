@@ -157,9 +157,11 @@ function WindowPanel({ win, fills }: { win: WindowCard; fills: FillRow[] }) {
 function RiskDesk({
   snap,
   onKill,
+  onHitl,
 }: {
   snap: HudSnapshot;
   onKill: () => void;
+  onHitl: (intentId: string, decision: "approve" | "deny") => void;
 }) {
   const { risk, pnl, mode, kill, fees, gate, settle, extras, reconcile } = snap;
   const last = risk.last_fill;
@@ -174,16 +176,98 @@ function RiskDesk({
 
       <div className="panel mode-panel">
         <label>1 · MODE</label>
-        <div className={cls("mode-badge", mode.hard_stop ? "hard" : mode.badge === "LIVE" ? "live" : "paper")}>
+        <div className={cls("mode-badge", mode.hard_stop ? "hard" : mode.badge === "HITL" ? "hitl" : mode.badge === "LIVE" || mode.badge === "LIVE_BLOCKED" ? "live" : "paper")}>
           {mode.badge}
         </div>
         <div className="panel-note">
           {mode.hard_stop
-            ? "LIVE WITHOUT APPROVAL — HARD STOP"
-            : mode.demo_submit
-              ? "PAPER desk · demo-submit is not production LIVE"
-              : "PAPER only · production LIVE requires explicit approval"}
+            ? mode.badge === "LIVE_BLOCKED"
+              ? "LIVE_BLOCKED — NO UNLOCK PATH — PAPER ONLY"
+              : "LIVE WITHOUT APPROVAL — HARD STOP"
+            : mode.badge === "HITL"
+              ? "HITL · new-risk ENTRY waits for approve · flatten/soft-abort bypass"
+              : mode.demo_submit
+                ? "PAPER desk · demo-submit is not production LIVE"
+                : "PAPER only · production LIVE requires explicit approval"}
         </div>
+      </div>
+
+      <div className="panel size-block">
+        <label>SIZE / BAYES · MM LANE</label>
+        <div className="kv tight">
+          <div>
+            <span>FAMILY D</span>
+            <b className="warn">OFF</b>
+          </div>
+          <div>
+            <span>SCALE_IN</span>
+            <b className="warn">
+              {snap.size?.scale_in.blocked_by ?? extras.scale_in_blocked_by ?? "LANE_MM"}
+            </b>
+          </div>
+          <div>
+            <span>KELLY ≤</span>
+            <b>{snap.size?.kelly_max ?? 0.25}</b>
+          </div>
+          <div>
+            <span>LANE</span>
+            <b>MM</b>
+          </div>
+        </div>
+        <div className="panel-note">
+          {snap.size?.note ?? "Family D / scale_in blocked_by=LANE_MM — no SCALE path"}
+        </div>
+      </div>
+
+      <div className={cls("panel", (snap.hitl_queue?.length ?? 0) > 0 && "breach")}>
+        <label>HITL APPROVALS</label>
+        <div className="panel-note">
+          {mode.badge === "HITL"
+            ? `pending ${snap.hitl_queue?.length ?? 0} · timeout ${snap.hitl_timeout_s ?? 60}s → HITL_BLOCK`
+            : "PAPER auto · queue empty / optional"}
+        </div>
+        {(snap.hitl_queue ?? []).length ? (
+          (snap.hitl_queue ?? []).map((card) => (
+            <div key={card.intent_id} className="hitl-card">
+              <header>
+                <b>{card.ticker}</b>
+                <span>
+                  {card.side.toUpperCase()} · {card.mode}
+                </span>
+              </header>
+              <div className="hitl-meta">
+                <div>
+                  CLIP <b>{card.clip ?? "—"}</b>
+                </div>
+                <div>
+                  EDGE <b>{card.edge != null ? card.edge.toFixed(3) : "—"}</b>
+                </div>
+                <div>
+                  P* <b>{card.p_star != null ? card.p_star.toFixed(3) : "—"}</b>
+                </div>
+                <div>
+                  HEADROOM <b>{card.kill_headroom ?? "—"}</b>
+                </div>
+                <div>
+                  KELLY <b>{card.kelly_frac != null ? card.kelly_frac.toFixed(3) : "—"}</b>
+                </div>
+                <div>
+                  PROJ OPEN <b>{card.projected_open ?? "—"}</b>
+                </div>
+              </div>
+              <div className="hitl-actions">
+                <button type="button" className="approve" onClick={() => onHitl(card.intent_id, "approve")}>
+                  APPROVE
+                </button>
+                <button type="button" className="deny" onClick={() => onHitl(card.intent_id, "deny")}>
+                  DENY
+                </button>
+              </div>
+            </div>
+          ))
+        ) : (
+          <div className="panel-note muted">No pending entry intents</div>
+        )}
       </div>
 
       <div className={cls("panel", !reconReady && "breach")}>
@@ -408,11 +492,13 @@ function Desk({
   live,
   clock,
   onKill,
+  onHitl,
 }: {
   snap: HudSnapshot;
   live: boolean;
   clock: Date;
   onKill: () => void;
+  onHitl: (intentId: string, decision: "approve" | "deny") => void;
 }) {
   const { risk, mode, kill, reconcile } = snap;
   const liveWins = snap.windows.filter((w) => w.live);
@@ -447,7 +533,7 @@ function Desk({
             <strong>{utc}</strong>
           </div>
           <div className="badges">
-            <span className={cls("badge", "mode", mode.hard_stop ? "hard" : "paper")}>{mode.badge}</span>
+            <span className={cls("badge", "mode", mode.hard_stop ? "hard" : mode.badge === "HITL" ? "hitl" : "paper")}>{mode.badge}</span>
             <span className={cls("badge", live && "on")}>{live ? "LIVE FEED" : "SEEKING"}</span>
             <span className="badge">{mode.mock ? "MOCK" : "PROD DATA"}</span>
             <span
@@ -466,7 +552,11 @@ function Desk({
       </header>
 
       {mode.hard_stop ? (
-        <div className="hardstop">HARD STOP · LIVE WITHOUT APPROVAL · PAPER ONLY</div>
+        <div className="hardstop">
+          {mode.badge === "LIVE_BLOCKED"
+            ? "HARD STOP · LIVE_BLOCKED · NO UNLOCK PATH · PAPER ONLY"
+            : "HARD STOP · LIVE WITHOUT APPROVAL · PAPER ONLY"}
+        </div>
       ) : null}
       {!reconReady ? (
         <div className={cls("norisk", reconHold && "not-ready")}>
@@ -497,7 +587,7 @@ function Desk({
       </section>
 
       <section className="grid">
-        <RiskDesk snap={snap} onKill={onKill} />
+        <RiskDesk snap={snap} onKill={onKill} onHitl={onHitl} />
 
         <main className="col books">
           <h2>TOP OF BOOK · ACTIVE 15M+</h2>
@@ -594,6 +684,26 @@ function Desk({
       </section>
 
       <section className="activity" aria-label="Session PnL and paper tape">
+        <div className="bus-strip" aria-label="Desk bus">
+          <span className="kicker">BUS</span>
+          {(snap.bus_events ?? []).length ? (
+            (snap.bus_events ?? []).slice(-8).map((ev, i) => (
+              <span
+                key={`${ev.code}-${ev.ts}-${i}`}
+                className={cls(
+                  "bus-chip",
+                  ev.code === "SoftAbort" && "soft",
+                  (ev.code === "HardKill" || ev.code === "DailyKillLatched") && "hard",
+                )}
+              >
+                {ev.code}
+                {ev.ticker ? ` · ${ev.ticker.split("-").pop()}` : ""}
+              </span>
+            ))
+          ) : (
+            <span className="bus-chip">IDLE</span>
+          )}
+        </div>
         <PnlCard snap={snap} />
         <TapeCard fills={snap.fills} />
       </section>
@@ -602,7 +712,7 @@ function Desk({
 }
 
 export function App() {
-  const { snap, live, clock, tripKill } = useHud();
+  const { snap, live, clock, tripKill, decideHitl } = useHud();
   if (!snap) {
     return (
       <div className="boot">
@@ -625,6 +735,9 @@ export function App() {
         if (window.confirm("Trip the paper kill switch? Entries block until restart.")) {
           void tripKill();
         }
+      }}
+      onHitl={(intentId, decision) => {
+        void decideHitl(intentId, decision);
       }}
     />
   );

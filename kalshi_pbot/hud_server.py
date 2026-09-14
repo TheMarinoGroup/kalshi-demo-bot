@@ -7,12 +7,13 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
+from kalshi_pbot.contracts import BLOCKED_LANE_MM, SizeIntentError, parse_size_intent, size_ui_block
 from kalshi_pbot.hud_state import MidHistory, build_snapshot
 
 log = structlog.get_logger(__name__)
@@ -22,6 +23,19 @@ HUD_DIST = Path(__file__).resolve().parent / "hud_static"
 
 class KillRequest(BaseModel):
     reason: str = Field(default="manual", max_length=120)
+
+
+class HitlDecisionBody(BaseModel):
+    decision: str = Field(..., min_length=3, max_length=16)
+
+
+class PretradeBody(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    intent_id: str = "pretrade"
+    mode: str
+    ticker: str = "unknown"
+    side: str = "yes"
 
 
 class HudHub:
@@ -66,6 +80,77 @@ def create_app(bot: Any, hub: HudHub, history: MidHistory) -> FastAPI:
         hub.publish(snap)
         log.warning("hud_manual_kill", reason=bot.risk.kill_reason)
         return {"ok": True, "kill": snap["kill"]}
+
+    @app.get("/v0/state")
+    def v0_state() -> dict[str, Any]:
+        hitl = getattr(bot, "hitl", None)
+        if hitl is None:
+            return {
+                "desk_mode": {
+                    "desk_lane": "MM",
+                    "mode": "PAPER",
+                    "paper": True,
+                    "profile": "dig6_tight",
+                    "bankroll": str(bot.settings.bankroll),
+                },
+                "hitl_queue": [],
+                "bus_events": [],
+                "allow_production": bool(bot.settings.allow_production),
+                "size": size_ui_block(kelly_max=bot.settings.kelly_max),
+            }
+        payload = hitl.state_payload()
+        payload["ts"] = hub.latest.get("ts") if hub.latest else None
+        return payload
+
+    @app.post("/v0/hitl/{intent_id}")
+    def v0_hitl(intent_id: str, body: HitlDecisionBody) -> dict[str, Any]:
+        if not hasattr(bot, "apply_hitl_decision"):
+            raise HTTPException(status_code=501, detail="HITL desk not attached")
+        try:
+            record, submitted = bot.apply_hitl_decision(intent_id, body.decision)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"unknown intent_id {intent_id}") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        snap = build_snapshot(bot, history)
+        hub.publish(snap)
+        dumped = record.model_dump()
+        dumped["submitted"] = len(submitted)
+        dumped["hitl_queue"] = snap.get("hitl_queue") or []
+        return dumped
+
+    @app.post("/v0/risk/pretrade")
+    def v0_pretrade(body: PretradeBody) -> dict[str, Any]:
+        """Thin RiskPreTradeDecision stub. Kelly is informational; SCALE is LANE_MM."""
+        payload = body.model_dump()
+        try:
+            size = parse_size_intent(payload)
+        except SizeIntentError as exc:
+            return {
+                "allowed": False,
+                "blocked_by": exc.blocked_by or BLOCKED_LANE_MM,
+                "detail": str(exc),
+                "kelly_frac": None,
+            }
+        except Exception as exc:
+            mode = str(payload.get("mode") or "")
+            if mode.lower() == "scale_in":
+                return {
+                    "allowed": False,
+                    "blocked_by": BLOCKED_LANE_MM,
+                    "detail": str(exc),
+                    "kelly_frac": None,
+                }
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        blocked = size.blocked_by
+        allowed = blocked is None
+        return {
+            "allowed": allowed,
+            "blocked_by": blocked,
+            "kelly_frac": size.kelly_frac,
+            "mode": size.mode,
+            "desk_lane": "MM",
+        }
 
     @app.websocket("/ws")
     async def stream(ws: WebSocket) -> None:
