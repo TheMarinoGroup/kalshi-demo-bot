@@ -6,10 +6,12 @@ from decimal import Decimal
 from fastapi.testclient import TestClient
 
 from kalshi_pbot.config import CLIP_MAX, CLIP_MIN, Settings
+from kalshi_pbot.fees import arb_taker_eligible
 from kalshi_pbot.hud_server import HudHub, create_app
 from kalshi_pbot.hud_state import MidHistory, _book_depth, _mode_block, build_snapshot
 from kalshi_pbot.risk_engine import classify_kill
 from kalshi_pbot.runner import PaperBot
+from kalshi_pbot.strategy.maker import is_underround
 from kalshi_pbot.types import Fill, MarketWindow, Outcome, RestingOrder
 from tests.conftest import book
 
@@ -117,9 +119,7 @@ def test_mode_live_without_approval_is_hard_stop() -> None:
 
 def test_last_fill_clip_and_fee_split(settings: Settings) -> None:
     bot = PaperBot(settings)
-    bot.portfolio.apply_fill(
-        _fill(count="40", fee="0", taker=False, fill_id="m")
-    )  # $20 maker
+    bot.portfolio.apply_fill(_fill(count="40", fee="0", taker=False, fill_id="m"))  # $20 maker
     bot.portfolio.apply_fill(
         _fill(
             ticker="KXETH15M-MOCK",
@@ -303,20 +303,63 @@ def test_drawdown_and_settled_directional(settings: Settings, now: datetime) -> 
 
 
 def test_book_depth_splits_underround_from_taker_arb() -> None:
-    under = _book_depth(book("0.4800", "0.4900"), Decimal("0.02"))
+    min_edge = Decimal("0.04")  # paper-v2 / Dig7 helper
+    typical = book("0.4700", "0.4800")  # bid_sum 0.95 ≤ 0.96; ask_sum 1.05
+    under = _book_depth(typical, min_edge)
+    assert is_underround(typical, min_edge) is True
     assert under["underround"] is True
     assert under["arb_taker_eligible"] is False
-    assert under["arb"] is False
-    assert under["ask_sum"] == 1.03
+    assert under["arb"] is False  # never flash green ARB for soft underround
+    assert under["bid_sum"] == 0.95
+    assert under["ask_sum"] == 1.05
     assert under["ask_sum_plus_fees"] > under["ask_sum"]
-    paper = _book_depth(book("0.4800", "0.4900"), Decimal("0.04"))
+    yes_ask, no_ask = typical.implied_yes_ask(), typical.implied_no_ask()
+    assert yes_ask is not None and no_ask is not None
+    assert arb_taker_eligible(yes_ask, no_ask) is False
+
+    # bid_sum < 1 is not enough: 0.97 is inside $1 but outside 1 − min_edge.
+    soft_not_gate = book("0.4800", "0.4900")
+    paper = _book_depth(soft_not_gate, min_edge)
+    assert is_underround(soft_not_gate, min_edge) is False
     assert paper["underround"] is False
+    assert paper["arb_taker_eligible"] is False
+    assert paper["arb"] is False
     assert paper["bid_sum"] == 0.97
 
-    # Crossed book: bid_sum 1.40, ask_sum 0.60 + taker fees still < 1.
-    regime_a = _book_depth(book("0.7000", "0.7000"), Decimal("0.02"))
+    # Regime A only when after-fee taker lock holds (ask_sum + fees/C < 1).
+    crossed = book("0.7000", "0.7000")
+    regime_a = _book_depth(crossed, min_edge)
+    assert is_underround(crossed, min_edge) is False
     assert regime_a["underround"] is False
     assert regime_a["arb_taker_eligible"] is True
     assert regime_a["arb"] is True
     assert regime_a["ask_sum"] == 0.60
     assert regime_a["ask_sum_plus_fees"] < 1.0
+    c_yes, c_no = crossed.implied_yes_ask(), crossed.implied_no_ask()
+    assert c_yes is not None and c_no is not None
+    assert arb_taker_eligible(c_yes, c_no) is True
+
+
+def test_snapshot_underround_chip_is_not_regime_a(settings: Settings) -> None:
+    bot = PaperBot(settings)
+    bot.universe.refresh()
+    bot.universe.hydrate_books(bot.books)
+    live = list(bot.universe.markets.values())
+    assert live
+    typical = book("0.4700", "0.4800")
+    typical.ticker = live[0].ticker
+    bot.books.set(typical)
+    snap = build_snapshot(bot, MidHistory())
+    win = next(w for w in snap["windows"] if w["ticker"] == live[0].ticker)
+    assert win["underround"] is True
+    assert win["arb_taker_eligible"] is False
+    assert win["arb"] is False
+
+    crossed = book("0.7000", "0.7000")
+    crossed.ticker = live[0].ticker
+    bot.books.set(crossed)
+    snap = build_snapshot(bot, MidHistory())
+    win = next(w for w in snap["windows"] if w["ticker"] == live[0].ticker)
+    assert win["underround"] is False
+    assert win["arb_taker_eligible"] is True
+    assert win["arb"] is True

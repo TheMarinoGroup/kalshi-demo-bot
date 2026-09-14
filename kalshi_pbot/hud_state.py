@@ -8,7 +8,7 @@ from decimal import Decimal
 from typing import Any
 
 from kalshi_pbot.config import CFB_INDEX, CLIP_MAX, CLIP_MIN, SETTLE_RECYCLE_BAND, Settings
-from kalshi_pbot.fees import pair_cost
+from kalshi_pbot.fees import arb_taker_eligible, pair_cost
 from kalshi_pbot.metrics import compute_metrics
 from kalshi_pbot.risk_engine import (
     capital_free_at,
@@ -19,6 +19,7 @@ from kalshi_pbot.risk_engine import (
     seconds_to_close,
     ttc_zone,
 )
+from kalshi_pbot.strategy.maker import is_underround
 from kalshi_pbot.types import CFBTick, Fill, MarketWindow, OrderBook, PortfolioSnapshot
 
 HISTORY_LEN = 180
@@ -222,7 +223,8 @@ def _book_depth(
     ask_sum = book.ask_sum()
     yes_ask = book.implied_yes_ask()
     no_ask = book.implied_no_ask()
-    underround = bool(bid_sum is not None and bid_sum <= Decimal("1") - min_edge)
+    # Regime B: same helper as paper-v2 ENTRY (bid_sum ≤ 1 − min_edge).
+    underround = is_underround(book, min_edge)
     ask_plus_fees = None
     taker_ok = False
     if yes_ask is not None and no_ask is not None:
@@ -236,8 +238,14 @@ def _book_depth(
             multiplier=multiplier,
         )
         ask_plus_fees = ask_sum + fees if ask_sum is not None else None
-        # Regime A: lock by lifting both implied asks after taker fees.
-        taker_ok = bool(ask_plus_fees is not None and ask_plus_fees < Decimal("1"))
+        # Regime A / Dig4: after-fee taker lock. Never alias underround as ARB.
+        taker_ok = arb_taker_eligible(
+            yes_ask,
+            no_ask,
+            Decimal("1"),
+            fee_type=fee_type,
+            multiplier=multiplier,
+        )
     return {
         "yes_bid_sz": _f(book.best_yes_bid_size()),
         "no_bid_sz": _f(book.best_no_bid_size()),

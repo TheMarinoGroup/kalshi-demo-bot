@@ -140,6 +140,35 @@ def taker_pair_viable(
     )
 
 
+def arb_taker_eligible(
+    yes_ask: Decimal,
+    no_ask: Decimal,
+    count: Decimal = ONE,
+    *,
+    fee_type: str = "quadratic",
+    multiplier: Decimal = ONE,
+) -> bool:
+    """Dig4 Regime A: ``ask_sum + modeled_taker_fees / C < 1``.
+
+    Equivalent to ``pair_edge > 0`` when both legs are taker. This is *not*
+    maker underround (``bid_sum ≤ 1 − min_edge``) and does not use min_edge.
+    """
+    c = D(count)
+    if c <= 0:
+        return False
+    _premium, fees = pair_cost(
+        yes_ask,
+        no_ask,
+        c,
+        yes_is_taker=True,
+        no_is_taker=True,
+        fee_type=fee_type,
+        multiplier=multiplier,
+    )
+    ask_sum = D(yes_ask) + D(no_ask)
+    return ask_sum + fees / c < ONE
+
+
 @dataclass(frozen=True)
 class FeeDrag:
     charged: Decimal
