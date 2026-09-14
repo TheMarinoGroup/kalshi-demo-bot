@@ -197,9 +197,17 @@ class RiskEngine:
     _latched_daily: bool = field(default=False, init=False)
 
     def trip(self, reason: str) -> None:
+        incoming_persistable = persistable_kill_reason(reason)
+        if (
+            self.kill_active
+            and persistable_kill_reason(self.kill_reason)
+            and not incoming_persistable
+        ):
+            # Daily-loss / manual must survive inventory trips and reconcile rebuilds.
+            return
         self.kill_active = True
         self.kill_reason = reason
-        if persistable_kill_reason(reason):
+        if incoming_persistable:
             self._persist_kill()
         else:
             self._clear_persisted_kill()
@@ -293,7 +301,12 @@ class RiskEngine:
         now: datetime | None = None,
     ) -> RiskDecision:
         self.maybe_trip_limits(snapshot)
+        flatten_like = (
+            intent.kind in {IntentKind.FLATTEN, IntentKind.CANCEL} or intent.reduce_only
+        )
         if not snapshot.ready_to_trade:
+            if flatten_like:
+                return RiskDecision(True, RejectReason.OK, "flatten_during_reconcile")
             return RiskDecision(
                 False,
                 RejectReason.NOT_READY,
@@ -310,8 +323,6 @@ class RiskEngine:
 
         if intent.count <= 0 or intent.price <= 0 or intent.price >= 1:
             return RiskDecision(False, RejectReason.INVALID, "price/count out of range")
-
-        flatten_like = intent.kind in {IntentKind.FLATTEN, IntentKind.CANCEL} or intent.reduce_only
 
         if in_last_seconds(close_time, self.settings.last_seconds, now):
             if flatten_like:

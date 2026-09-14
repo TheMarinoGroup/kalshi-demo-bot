@@ -39,7 +39,8 @@ log = structlog.get_logger(__name__)
 
 SOURCE_PAPER_LOCAL = "PAPER LOCAL"
 SOURCE_EXCHANGE_SYNC = "EXCHANGE SYNC"
-STATUS_RECONCILING = "RECONCILING"
+STATUS_SYNCING = "SYNCING"
+STATUS_RECONCILING = STATUS_SYNCING  # historical alias; HUD shows SYNCING
 STATUS_NOT_READY = "NOT READY"
 STATUS_READY = "READY"
 
@@ -63,7 +64,7 @@ class ExchangeSnapshot:
 @dataclass
 class ReconcileState:
     ready_to_trade: bool = False
-    status: str = STATUS_RECONCILING
+    status: str = STATUS_SYNCING
     source: str = ""
     error: str = ""
     attempts: int = 0
@@ -91,6 +92,8 @@ class ReconcileState:
             "paper_fills_restored": self.paper_fills_restored,
             "paper_quotes_restored": self.paper_quotes_restored,
             "next_retry_ts": self.next_retry_ts.isoformat() if self.next_retry_ts else None,
+            "hard_hold": (not self.ready_to_trade) and self.status == STATUS_NOT_READY,
+            "book_verified": self.ready_to_trade,
         }
 
 
@@ -441,7 +444,7 @@ class Reconciler:
     def attempt(self, now: datetime | None = None) -> ReconcileState:
         now = now or datetime.now(UTC)
         self.state.attempts += 1
-        self.state.status = STATUS_RECONCILING
+        self.state.status = STATUS_SYNCING
         self.state.ready_to_trade = False
         self.portfolio.ready_to_trade = False
         if self.execution is not None:
@@ -653,7 +656,7 @@ class Reconciler:
             error=error,
             attempt=self.state.attempts,
             retry_s=round(delay, 3),
-            hint="ready_to_trade=false; refusing new quotes until exchange snapshot succeeds",
+            hint="hard hold; flatten/cancel only until exchange snapshot succeeds",
         )
         if self.tape:
             self.tape.write(

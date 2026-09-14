@@ -50,21 +50,36 @@ def test_last_60s_blocks_new_entries(settings: Settings, now: datetime) -> None:
     assert decision.reason is RejectReason.LAST_SECONDS
 
 
-def test_not_ready_blocks_entries_and_flatten(settings: Settings, now: datetime) -> None:
+def test_not_ready_blocks_entries_allows_flatten(settings: Settings, now: datetime) -> None:
     engine = RiskEngine(settings)
     close = now + timedelta(minutes=10)
     snap = empty_snapshot(settings, ready_to_trade=False)
     entry = engine.evaluate(_intent(), snap, close_time=close, now=now)
     assert entry.allowed is False
     assert entry.reason is RejectReason.NOT_READY
+    complete = engine.evaluate(
+        _intent(kind=IntentKind.COMPLETE_PAIR),
+        snap,
+        close_time=close,
+        now=now,
+    )
+    assert complete.allowed is False
+    assert complete.reason is RejectReason.NOT_READY
     flatten = engine.evaluate(
         _intent(kind=IntentKind.FLATTEN, reduce_only=True),
         snap,
         close_time=close,
         now=now,
     )
-    assert flatten.allowed is False
-    assert flatten.reason is RejectReason.NOT_READY
+    assert flatten.allowed is True
+    assert flatten.reason is RejectReason.OK
+    cancel = engine.evaluate(
+        _intent(kind=IntentKind.CANCEL, reduce_only=True),
+        snap,
+        close_time=close,
+        now=now,
+    )
+    assert cancel.allowed is True
 
 
 def test_last_60s_allows_flatten_and_cancel(settings: Settings, now: datetime) -> None:
@@ -456,3 +471,18 @@ def test_open_kill_is_not_persisted(now: datetime) -> None:
     other = RiskEngine(settings)
     assert other.restore_persisted_kill() is False
     assert not other.kill_active
+
+
+def test_onesided_trip_does_not_clear_persisted_daily_loss(settings: Settings) -> None:
+    engine = RiskEngine(settings)
+    engine.maybe_trip_daily(empty_snapshot(settings, daily_pnl=Decimal("-21")))
+    assert engine.kill_active
+    assert Path(settings.kill_latch_path).is_file()
+    reason = engine.kill_reason
+    engine.trip("onesided 20.00 >= 15")
+    assert engine.kill_reason == reason
+    assert classify_kill(engine.kill_reason) == "loss"
+    assert Path(settings.kill_latch_path).is_file()
+    restored = RiskEngine(settings)
+    assert restored.restore_persisted_kill() is True
+    assert classify_kill(restored.kill_reason) == "loss"

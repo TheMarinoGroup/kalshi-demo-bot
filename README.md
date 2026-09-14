@@ -325,14 +325,15 @@ A process restart (watchdog, crash, `Ctrl+C`) does **not** reconstruct in-memory
 
 What used to live only in RAM (and still does, until reconcile runs): paper positions, unpaired inventory, resting quotes, session PnL. **Before this feature, a paper restart lost that book.** After this feature:
 
-1. `ready_to_trade=false` until reconcile completes. The HUD shows **RECONCILING** / **NOT READY**. The runner refuses new quotes and live cancels until then.
-2. With credentials, the bot fetches **GET `/portfolio/positions`** and **GET `/portfolio/orders?status=resting`** (demo or production *read* path on the configured order host). That snapshot is the source of truth: open notional, onesided legs, resting quotes.
-3. Auth / network / partial responses **fail closed**: stay NOT READY, log `reconcile_failed`, retry with backoff. Do not quote blind.
+1. `ready_to_trade=false` until reconcile completes. The HUD shows **SYNCING** vs **READY**. A failed fetch is **NOT READY · HARD HOLD** (never a silent empty book). Flatten/cancel of known inventory is allowed; **all new risk is refused**.
+2. With credentials, the bot fetches **GET `/portfolio/positions`** and **GET `/portfolio/orders?status=resting`** before any new quotes and rebuilds `PortfolioSnapshot` (open, onesided, windows, daily PnL inputs from current-market `realized_pnl` + `fees`). Option B / v1 caps and Dig6 unpaired-age / soft abort still apply on that rebuilt state.
+3. Auth / network / partial responses **fail closed**: stay NOT READY / hard hold, log `reconcile_failed`, retry with backoff. Do not quote blind and do not present an unverified empty book as flat.
 4. Paper-tape / mock without exchange inventory: best-effort rebuild from *today's* tape + windows, labeled **PAPER LOCAL**. An empty exchange snapshot plus that local restore may mark ready. Pre-reconcile paper restarts still lose any in-memory fills that never hit the tape.
 5. If the exchange returns positions or resting orders, the label is **EXCHANGE SYNC** and the tape is not mixed in (would double-count).
 6. Cancel-orphan policy is **off by default**. Unexpected resting orders on watched series are adopted into the local book and logged. `KALSHI_CANCEL_ORPHANS=true` may cancel them only on `--demo-submit` against demo hosts. Production never auto-cancels, even with the flag.
+7. Reconcile does **not** auto-clear the persisted daily-loss / manual kill latch (`data/kill-latch.json`). Inventory trips (open/onesided) cannot replace that latch.
 
-Defaults remain paper / dry-run. This does **not** enable `KALSHI_ALLOW_PRODUCTION` or live submit. Risk Desk must re-check before any micro-live.
+Defaults remain paper / dry-run. View-only / paper never POST production orders. This does **not** enable `KALSHI_ALLOW_PRODUCTION` or live submit. Risk Desk must re-check before any micro-live.
 
 Open **http://127.0.0.1:8080**. Frontend is Vite + React, served by the
 bot's FastAPI process (`/api/snapshot`, `/ws`). For UI hot-reload:

@@ -78,7 +78,7 @@ class ExecutionEngine:
         return self.settings.live_submit and self.rest is not None
 
     def submit(self, intent: QuoteIntent, book: OrderBook | None = None) -> dict[str, object]:
-        if not self.ready_to_trade:
+        if not self.ready_to_trade and increases_open_risk(intent):
             log.warning(
                 "submit_blocked_not_ready",
                 ticker=intent.market_ticker,
@@ -227,13 +227,6 @@ class ExecutionEngine:
         return payload
 
     def cancel(self, intent: CancelIntent) -> dict[str, object]:
-        if not self.ready_to_trade and self.live_submit:
-            log.warning(
-                "cancel_blocked_not_ready",
-                order_id=intent.order_id,
-                ticker=intent.market_ticker,
-            )
-            return {"ok": False, "error": "not_ready"}
         if intent.cancel_all:
             return self.cancel_all()
         if not intent.order_id:
@@ -268,6 +261,8 @@ class ExecutionEngine:
             return {"status": response.status_code}
 
     def cancel_all(self) -> dict[str, object]:
+        # Account-wide live cancel waits for a verified book. Paper/local
+        # and known-id flatten/cancel stay allowed during reconcile.
         if not self.ready_to_trade and self.live_submit:
             log.warning("cancel_all_blocked_not_ready")
             return {"ok": False, "error": "not_ready"}

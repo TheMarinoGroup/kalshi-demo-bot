@@ -311,9 +311,10 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
     if recon is not None:
         reconcile = recon.state.as_hud(cancel_orphans=settings.cancel_orphans)
     else:
+        ready_fallback = bool(getattr(bot.portfolio, "ready_to_trade", True))
         reconcile = {
-            "ready_to_trade": bool(getattr(bot.portfolio, "ready_to_trade", True)),
-            "status": "READY" if getattr(bot.portfolio, "ready_to_trade", True) else "RECONCILING",
+            "ready_to_trade": ready_fallback,
+            "status": "READY" if ready_fallback else "SYNCING",
             "source": "",
             "error": "",
             "attempts": 0,
@@ -325,6 +326,8 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
             "paper_fills_restored": 0,
             "paper_quotes_restored": 0,
             "next_retry_ts": None,
+            "hard_hold": False,
+            "book_verified": ready_fallback,
         }
     ready = bool(reconcile.get("ready_to_trade"))
     metrics = compute_metrics(settings, bot.portfolio, port)
@@ -402,6 +405,9 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
                 "last60s_lock": last_60,
                 "new_risk_allowed": new_risk,
                 "reconcile_ready": ready,
+                "reconcile_status": reconcile.get("status"),
+                "hard_hold": bool(reconcile.get("hard_hold")),
+                "book_verified": bool(reconcile.get("book_verified", ready)),
                 "gate_violation": violation,
                 "live": live,
                 "yes_bid": _f(tob.yes_bid) if tob else None,
@@ -610,6 +616,8 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
             "no_new_risk": any_last_60 or kill_active or (not ready),
             "new_risk_allowed": new_risk_allowed,
             "ready_to_trade": ready,
+            "hard_hold": bool(reconcile.get("hard_hold")),
+            "book_verified": bool(reconcile.get("book_verified", ready)),
             "violation": any_violation,
             "windows": gate_rows,
         },

@@ -349,10 +349,7 @@ class PaperBot:
         now = now or datetime.now(UTC)
         now_ms = int(now.timestamp() * 1000)
         self.reconcile.maybe_attempt(now)
-        if not self.portfolio.ready_to_trade:
-            emit_metrics(compute_metrics(self.settings, self.portfolio, self.portfolio.snapshot()))
-            self._publish_hud(now)
-            return []
+        ready = self.portfolio.ready_to_trade
         self.portfolio.reset_day_if_needed(now)
         self._drain_matcher(now_ms)
         self._recycle_settled(now)
@@ -369,8 +366,10 @@ class PaperBot:
         self.risk.maybe_trip_limits(snapshot)
         if self.risk.kill_active:
             self._sync_kill_flags()
-            self.execution.cancel_all()
-            snapshot = self.portfolio.snapshot(books)
+            if ready:
+                # Do not account-wide-cancel an unverified production book.
+                self.execution.cancel_all()
+                snapshot = self.portfolio.snapshot(books)
 
         submitted: list[QuoteIntent] = []
 
@@ -406,7 +405,7 @@ class PaperBot:
             for intent in contained:
                 aged_tickers.add(intent.market_ticker)
 
-        if self.risk.kill_active:
+        if self.risk.kill_active or not ready:
             emit_metrics(compute_metrics(self.settings, self.portfolio, snapshot))
             self._publish_hud(now)
             return submitted

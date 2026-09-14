@@ -66,6 +66,8 @@ def test_snapshot_must_show_panels_from_mock_bot() -> None:
     assert snap["kill"]["active"] is False
     assert snap["reconcile"]["ready_to_trade"] is True
     assert snap["reconcile"]["status"] == "READY"
+    assert snap["reconcile"]["book_verified"] is True
+    assert snap["reconcile"]["hard_hold"] is False
     assert snap["gate"]["ready_to_trade"] is True
     assert set(snap["util"]) == {"fill", "open", "windows", "onesided", "daily_loss"}
     assert snap["util"]["open"]["label"] == "util_open"

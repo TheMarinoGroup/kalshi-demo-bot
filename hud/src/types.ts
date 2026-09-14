@@ -31,6 +31,9 @@ export type WindowCard = {
   last60s_lock?: boolean;
   new_risk_allowed?: boolean;
   reconcile_ready?: boolean;
+  reconcile_status?: string;
+  hard_hold?: boolean;
+  book_verified?: boolean;
   gate_violation?: boolean;
   live: boolean;
   yes_bid: number | null;
@@ -112,7 +115,7 @@ export type HudSnapshot = {
   };
   reconcile?: {
     ready_to_trade: boolean;
-    status: "RECONCILING" | "READY" | "NOT READY" | string;
+    status: "SYNCING" | "READY" | "NOT READY" | string;
     source: string;
     error: string;
     attempts: number;
@@ -124,6 +127,8 @@ export type HudSnapshot = {
     paper_fills_restored?: number;
     paper_quotes_restored?: number;
     next_retry_ts?: string | null;
+    hard_hold?: boolean;
+    book_verified?: boolean;
   };
   kill: {
     active: boolean;
@@ -174,6 +179,8 @@ export type HudSnapshot = {
     no_new_risk?: boolean;
     new_risk_allowed: boolean;
     ready_to_trade?: boolean;
+    hard_hold?: boolean;
+    book_verified?: boolean;
     violation: boolean;
     windows: {
       ticker: string;

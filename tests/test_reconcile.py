@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -17,12 +18,15 @@ from kalshi_pbot.reconcile import (
     SOURCE_PAPER_LOCAL,
     STATUS_NOT_READY,
     STATUS_READY,
+    STATUS_SYNCING,
     Reconciler,
     may_cancel_orphans,
 )
+from kalshi_pbot.risk_engine import RiskEngine, classify_kill
 from kalshi_pbot.runner import PaperBot
 from kalshi_pbot.tape import JsonlTape
-from kalshi_pbot.types import Liquidity, Outcome, QuoteIntent
+from kalshi_pbot.types import IntentKind, Liquidity, Outcome, QuoteIntent, RejectReason, TimeInForce
+from tests.conftest import empty_snapshot
 from tests.test_kalshi_client import _client
 
 
@@ -42,6 +46,7 @@ class FakeRest:
         self.fail_orders = fail_orders
         self.cancel_status = cancel_status
         self.cancelled: list[tuple[str, str]] = []
+        self.created_orders: list[dict] = []
 
     def list_market_positions(self) -> list[dict]:
         if self.error:
@@ -59,6 +64,10 @@ class FakeRest:
         self.cancelled.append((order_id, market_ticker))
         return httpx.Response(self.cancel_status, json={"order_id": order_id})
 
+    def create_order(self, body: dict) -> httpx.Response:
+        self.created_orders.append(body)
+        raise AssertionError("create_order must not run on paper/view-only reconcile")
+
 
 def _settings(**kwargs: object) -> Settings:
     defaults: dict[str, object] = {
@@ -75,15 +84,19 @@ def _yes_position(
     ticker: str = "KXBTC15M-T",
     qty: str = "20.00",
     exposure: str = "10.0000",
+    *,
+    realized: str = "0.0000",
+    fees: str = "0.0000",
+    last_updated_ts: str = "2026-09-14T12:00:00Z",
 ) -> dict:
     return {
         "ticker": ticker,
         "event_ticker": ticker,
         "position_fp": qty,
         "market_exposure_dollars": exposure,
-        "realized_pnl_dollars": "0.0000",
-        "fees_paid_dollars": "0.0000",
-        "last_updated_ts": "2026-09-14T12:00:00Z",
+        "realized_pnl_dollars": realized,
+        "fees_paid_dollars": fees,
+        "last_updated_ts": last_updated_ts,
         "total_traded_dollars": exposure,
         "exchange_index": 0,
     }
@@ -131,6 +144,50 @@ def _reconciler(settings: Settings, rest: FakeRest | None, **kwargs: object) -> 
         mock=bool(kwargs.get("mock", False)),
     )
     return rec
+
+
+def _entry_intent(ticker: str = "KXBTC15M-T") -> QuoteIntent:
+    return QuoteIntent(
+        market_ticker=ticker,
+        event_ticker=ticker,
+        outcome=Outcome.YES,
+        price=Decimal("0.50"),
+        count=Decimal("20"),
+        liquidity=Liquidity.MAKER,
+        tif=TimeInForce.GTC,
+        post_only=True,
+        kind=IntentKind.ENTRY,
+    )
+
+
+def _flatten_intent(ticker: str = "KXBTC15M-T") -> QuoteIntent:
+    return QuoteIntent(
+        market_ticker=ticker,
+        event_ticker=ticker,
+        outcome=Outcome.YES,
+        price=Decimal("0.48"),
+        count=Decimal("20"),
+        liquidity=Liquidity.TAKER,
+        tif=TimeInForce.IOC,
+        post_only=False,
+        reduce_only=True,
+        sell=True,
+        kind=IntentKind.FLATTEN,
+    )
+
+
+def _paper_bot(**kwargs: object) -> PaperBot:
+    defaults: dict[str, object] = {
+        "mock": True,
+        "dry_run": True,
+        "paper_tape": True,
+        "series": "KXBTC15M",
+    }
+    defaults.update(kwargs)
+    bot = PaperBot(Settings(**defaults))
+    bot.universe.refresh()
+    bot.universe.hydrate_books(bot.books)
+    return bot
 
 
 def test_empty_exchange_snapshot_marks_paper_ready() -> None:
@@ -206,6 +263,12 @@ def test_api_error_fail_closed_no_quotes() -> None:
     )
     assert result["error"] == "not_ready"
     assert engine.dry_run_orders == []
+    hud = rec.state.as_hud(cancel_orphans=False)
+    assert hud["hard_hold"] is True
+    assert hud["book_verified"] is False
+    flat = engine.submit(_flatten_intent())
+    assert flat.get("error") != "not_ready"
+    assert engine.dry_run_orders
 
 
 def test_partial_orders_failure_fail_closed() -> None:
@@ -348,19 +411,21 @@ def test_paper_bot_step_refuses_quotes_until_ready() -> None:
     assert all(q.kind is not None for q in submitted)
 
 
-def test_hud_shows_reconciling_then_ready() -> None:
-    bot = PaperBot(Settings(mock=True, dry_run=True, paper_tape=True, series="KXBTC15M"))
-    bot.universe.refresh()
-    bot.universe.hydrate_books(bot.books)
+def test_hud_shows_syncing_then_ready() -> None:
+    bot = _paper_bot()
     before = build_snapshot(bot, MidHistory())
     assert before["reconcile"]["ready_to_trade"] is False
-    assert before["reconcile"]["status"] in {"RECONCILING", "NOT READY"}
+    assert before["reconcile"]["status"] == STATUS_SYNCING
+    assert before["reconcile"]["book_verified"] is False
+    assert before["reconcile"]["hard_hold"] is False
     assert before["gate"]["new_risk_allowed"] is False
     assert before["gate"]["ready_to_trade"] is False
     bot.step()
     after = build_snapshot(bot, MidHistory())
     assert after["reconcile"]["ready_to_trade"] is True
     assert after["reconcile"]["status"] == STATUS_READY
+    assert after["reconcile"]["book_verified"] is True
+    assert after["reconcile"]["hard_hold"] is False
     assert after["reconcile"]["source"] == SOURCE_PAPER_LOCAL
 
 
@@ -429,3 +494,153 @@ def test_pagination_overflow_fail_closed() -> None:
         client.close()
     # sanity: cap is finite
     assert PAGINATE_MAX_PAGES == 50
+
+
+def test_exchange_snapshot_rebuilds_daily_pnl_inputs() -> None:
+    settings = _settings()
+    rec = _reconciler(
+        settings,
+        FakeRest(
+            [_yes_position(qty="20.00", exposure="10.0000", realized="-4.0000", fees="0.5000")],
+            [],
+        ),
+    )
+    rec.attempt()
+    snap = rec.portfolio.snapshot()
+    assert rec.state.source == SOURCE_EXCHANGE_SYNC
+    assert snap.realized_pnl == Decimal("-4.0000")
+    assert snap.fees == Decimal("0.5000")
+    assert snap.unrealized_pnl == Decimal("0")
+    assert snap.daily_pnl == Decimal("-4.5000")
+    assert snap.open_notional == Decimal("10.0000")
+    assert snap.unpaired_notional == Decimal("10.0000")
+    assert snap.window_ids == frozenset({"KXBTC15M-T"})
+    assert rec.portfolio.kill_active is False
+
+
+def test_rebuilt_state_still_enforces_option_b_caps() -> None:
+    settings = _settings()
+    rec = _reconciler(
+        settings,
+        FakeRest([_yes_position(qty="50.00", exposure="25.0000")], []),
+    )
+    rec.attempt()
+    snap = rec.portfolio.snapshot()
+    assert snap.ready_to_trade is True
+    assert snap.open_notional == Decimal("25.0000")
+    assert snap.unpaired_notional == Decimal("25.0000")
+    engine = RiskEngine(settings)
+    now = datetime(2026, 9, 14, 12, 0, tzinfo=UTC)
+    close = now + timedelta(minutes=10)
+    entry = engine.evaluate(_entry_intent(), snap, close_time=close, now=now)
+    assert entry.allowed is False
+    assert entry.reason in {
+        RejectReason.OPEN_NOTIONAL,
+        RejectReason.ONESIDED_CAP,
+        RejectReason.UNPAIRED_EXISTS,
+        RejectReason.KILL_SWITCH,
+    }
+    tiny = QuoteIntent(
+        market_ticker="KXBTC15M-T",
+        event_ticker="KXBTC15M-T",
+        outcome=Outcome.YES,
+        price=Decimal("0.50"),
+        count=Decimal("10"),
+        liquidity=Liquidity.MAKER,
+        kind=IntentKind.ENTRY,
+    )
+    clip = engine.evaluate(tiny, empty_snapshot(settings), close_time=close, now=now)
+    assert clip.allowed is False
+    assert clip.reason is RejectReason.PER_FILL
+    flatten = engine.evaluate(_flatten_intent(), snap, close_time=close, now=now)
+    assert flatten.allowed is True
+
+
+def test_fail_closed_hard_hold_never_silent_empty_book() -> None:
+    bot = _paper_bot()
+    rest = FakeRest(error=RuntimeError("network down"))
+    bot.reconcile.mock = False
+    bot.reconcile.rest = rest  # type: ignore[assignment]
+    submitted = bot.step()
+    assert all(q.kind is not IntentKind.ENTRY for q in submitted)
+    assert all(q.kind is not IntentKind.COMPLETE_PAIR for q in submitted)
+    hud = build_snapshot(bot, MidHistory())
+    assert hud["reconcile"]["status"] == STATUS_NOT_READY
+    assert hud["reconcile"]["ready_to_trade"] is False
+    assert hud["reconcile"]["hard_hold"] is True
+    assert hud["reconcile"]["book_verified"] is False
+    assert hud["positions"] == []
+    assert hud["gate"]["new_risk_allowed"] is False
+    assert rest.created_orders == []
+
+
+def test_rebuilt_over_soft_onesided_flattens_after_sync() -> None:
+    bot = _paper_bot()
+    ticker = next(iter(bot.universe.markets))
+    rest = FakeRest([_yes_position(ticker, qty="40.00", exposure="20.0000")], [])
+    bot.reconcile.mock = False
+    bot.reconcile.rest = rest  # type: ignore[assignment]
+    submitted = bot.step()
+    assert bot.portfolio.ready_to_trade is True
+    assert bot.reconcile.state.source == SOURCE_EXCHANGE_SYNC
+    assert any(q.kind is IntentKind.FLATTEN for q in submitted)
+    assert not any(q.kind is IntentKind.ENTRY for q in submitted)
+    assert rest.created_orders == []
+
+
+def test_rebuilt_aged_unpaired_still_aborts() -> None:
+    bot = _paper_bot()
+    ticker = next(iter(bot.universe.markets))
+    now = datetime.now(UTC)
+    aged = (now - timedelta(seconds=46)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rest = FakeRest(
+        [
+            _yes_position(
+                ticker,
+                qty="20.00",
+                exposure="8.0000",
+                last_updated_ts=aged,
+            )
+        ],
+        [],
+    )
+    bot.reconcile.mock = False
+    bot.reconcile.rest = rest  # type: ignore[assignment]
+    submitted = bot.step(now=now)
+    assert bot.portfolio.ready_to_trade is True
+    pos = bot.portfolio.positions[ticker]
+    assert pos.unpaired_since is not None
+    assert any(q.kind is IntentKind.FLATTEN for q in submitted)
+    assert not any(q.kind is IntentKind.ENTRY for q in submitted)
+
+
+def test_reconcile_does_not_clear_persisted_daily_loss_latch() -> None:
+    bot = _paper_bot(paper_tape=False)
+    ticker = next(iter(bot.universe.markets))
+    bot.risk.maybe_trip_daily(empty_snapshot(bot.settings, daily_pnl=Decimal("-21")))
+    latch = Path(bot.settings.kill_latch_path)
+    assert latch.is_file()
+    reason = bot.risk.kill_reason
+    assert classify_kill(reason) == "loss"
+    rest = FakeRest([_yes_position(ticker, qty="40.00", exposure="20.0000")], [])
+    bot.reconcile.mock = False
+    bot.reconcile.rest = rest  # type: ignore[assignment]
+    bot.step()
+    assert latch.is_file()
+    assert bot.risk.kill_active is True
+    assert classify_kill(bot.risk.kill_reason) == "loss"
+    assert bot.risk.kill_reason == reason
+
+
+def test_paper_reconcile_never_posts_and_allow_production_stays_off() -> None:
+    assert Settings().allow_production is False
+    rest = FakeRest([], [])
+    rec = _reconciler(_settings(), rest)
+    rec.attempt()
+    assert rest.created_orders == []
+    bot = _paper_bot()
+    assert bot.settings.allow_production is False
+    assert bot.execution.live_submit is False
+    bot.step()
+    assert bot.settings.allow_production is False
+    assert bot.execution.live_submit is False

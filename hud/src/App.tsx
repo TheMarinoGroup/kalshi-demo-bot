@@ -137,7 +137,11 @@ function WindowPanel({ win, fills }: { win: WindowCard; fills: FillRow[] }) {
         ) : win.last60s_lock || win.last_60s ? (
           <span className="pill warn">LAST 60s — NO NEW RISK</span>
         ) : win.live && win.reconcile_ready === false ? (
-          <span className="pill warn">NOT READY — NO NEW RISK</span>
+          <span className="pill warn">
+            {win.reconcile_status === "NOT READY" || win.hard_hold
+              ? "NOT READY — HARD HOLD"
+              : "SYNCING — NO NEW RISK"}
+          </span>
         ) : (
           <span className="pill ok">NEW RISK ALLOWED</span>
         )}
@@ -160,8 +164,9 @@ function RiskDesk({
   const { risk, pnl, mode, kill, fees, gate, settle, extras, reconcile } = snap;
   const last = risk.last_fill;
   const band = risk.settle_band?.length ? risk.settle_band : [60, 90];
-  const reconStatus = reconcile?.status ?? (reconcile?.ready_to_trade ? "READY" : "RECONCILING");
+  const reconStatus = reconcile?.status ?? (reconcile?.ready_to_trade ? "READY" : "SYNCING");
   const reconReady = Boolean(reconcile?.ready_to_trade);
+  const reconHold = Boolean(reconcile?.hard_hold) || reconStatus === "NOT READY";
 
   return (
     <aside className="col risk">
@@ -186,7 +191,7 @@ function RiskDesk({
         <div className="kv tight">
           <div>
             <span>STATE</span>
-            <b className={cls(reconReady ? "up" : "warn")}>{reconStatus}</b>
+            <b className={cls(reconReady ? "up" : reconHold ? "down" : "warn")}>{reconStatus}</b>
           </div>
           <div>
             <span>SRC</span>
@@ -196,9 +201,9 @@ function RiskDesk({
         <div className="panel-note">
           {reconReady
             ? `${reconcile?.source || "SYNC"} · pos ${reconcile?.position_count ?? 0} · rest ${reconcile?.resting_count ?? 0}`
-            : reconcile?.error
-              ? `NOT READY · ${reconcile.error}`
-              : "RECONCILING · no new quotes until exchange snapshot"}
+            : reconHold
+              ? `NOT READY · HARD HOLD${reconcile?.error ? ` · ${reconcile.error}` : ""}`
+              : "SYNCING · NO NEW RISK · FLATTEN/CANCEL ONLY"}
         </div>
       </div>
 
@@ -412,8 +417,10 @@ function Desk({
   const { risk, mode, kill, reconcile } = snap;
   const liveWins = snap.windows.filter((w) => w.live);
   const utc = clock.toISOString().slice(11, 23);
-  const reconStatus = reconcile?.status ?? "RECONCILING";
+  const reconStatus = reconcile?.status ?? "SYNCING";
   const reconReady = Boolean(reconcile?.ready_to_trade);
+  const reconHold = Boolean(reconcile?.hard_hold) || reconStatus === "NOT READY";
+  const bookVerified = reconcile?.book_verified ?? reconReady;
 
   return (
     <div className="desk">
@@ -446,7 +453,7 @@ function Desk({
             <span
               className={cls(
                 "badge",
-                reconReady ? "ok" : reconStatus === "NOT READY" ? "kill" : "reconciling",
+                reconReady ? "ok" : reconHold ? "kill" : "syncing",
               )}
             >
               {reconStatus}
@@ -462,10 +469,10 @@ function Desk({
         <div className="hardstop">HARD STOP · LIVE WITHOUT APPROVAL · PAPER ONLY</div>
       ) : null}
       {!reconReady ? (
-        <div className={cls("norisk", reconStatus === "NOT READY" && "not-ready")}>
-          {reconStatus === "NOT READY"
-            ? `NOT READY · RECONCILE FAILED · NO NEW RISK${reconcile?.error ? ` · ${reconcile.error}` : ""}`
-            : "RECONCILING · NO NEW RISK · WAITING ON EXCHANGE SNAPSHOT"}
+        <div className={cls("norisk", reconHold && "not-ready")}>
+          {reconHold
+            ? `NOT READY · HARD HOLD${reconcile?.error ? ` · ${reconcile.error}` : ""}`
+            : "SYNCING · NO NEW RISK · FLATTEN/CANCEL ONLY"}
         </div>
       ) : null}
       {snap.gate.last60s_lock ? (
@@ -543,7 +550,7 @@ function Desk({
               ) : (
                 <tr>
                   <td colSpan={4} className="muted">
-                    Flat — no incomplete pairs
+                    {bookVerified ? "Flat — no incomplete pairs" : "UNVERIFIED · WAITING ON EXCHANGE"}
                   </td>
                 </tr>
               )}
@@ -577,7 +584,7 @@ function Desk({
               ) : (
                 <tr>
                   <td colSpan={4} className="muted">
-                    No resting paper
+                    {bookVerified ? "No resting paper" : "UNVERIFIED · WAITING ON EXCHANGE"}
                   </td>
                 </tr>
               )}

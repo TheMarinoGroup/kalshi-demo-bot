@@ -115,7 +115,12 @@ class Portfolio:
         positions: list[Position],
         resting: list[RestingOrder],
     ) -> None:
-        """Replace in-memory book with an exchange snapshot. Does not enforce caps."""
+        """Replace in-memory book with an exchange snapshot. Does not enforce caps.
+
+        Daily PnL inputs come from the current-market position records
+        (``realized_pnl`` + ``fees``). This is not a full account-lifetime
+        blotter. Does **not** touch kill flags or the persisted kill latch.
+        """
         self.positions = {
             pos.market_ticker: pos
             for pos in positions
@@ -124,6 +129,10 @@ class Portfolio:
         self.resting = {}
         for order in resting:
             self.upsert_resting(order, enforce_open_cap=False)
+        self.realized_pnl = sum(
+            (pos.realized_pnl for pos in self.positions.values()), Decimal("0")
+        )
+        self.fees = sum((pos.fees for pos in self.positions.values()), Decimal("0"))
 
     def apply_fill(self, fill: Fill, *, enforce_open_cap: bool = True) -> bool:
         """Apply a paper/demo fill. Refuses before mutation if open would exceed max_open."""
