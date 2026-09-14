@@ -20,6 +20,7 @@ from kalshi_pbot.types import (
 def _research_paths(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("KALSHI_WINDOWS_PATH", str(tmp_path / "windows.json"))
     monkeypatch.setenv("KALSHI_TAPE_PATH", str(tmp_path / "tape.jsonl"))
+    monkeypatch.setenv("KALSHI_KILL_LATCH_PATH", str(tmp_path / "kill-latch.json"))
 
 
 @pytest.fixture

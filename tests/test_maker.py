@@ -7,6 +7,7 @@ from kalshi_pbot.config import Settings
 from kalshi_pbot.strategy.maker import (
     MakerStrategy,
     clip_count,
+    count_within_open_cap,
     is_underround,
     join_bid,
     paired_clip_count,
@@ -216,3 +217,53 @@ def test_quote_stays_inside_implied_ask(settings: Settings, market, now) -> None
         assert q.price < Decimal("1") - Decimal("0.5100")
     else:
         assert q.price < Decimal("1") - Decimal("0.4800")
+
+
+def test_count_within_open_cap_blocks_overshoot() -> None:
+    assert count_within_open_cap(
+        Decimal("40"), Decimal("0.70"), Decimal("10"), Decimal("25")
+    ) == Decimal("21")
+    assert count_within_open_cap(
+        Decimal("40"), Decimal("0.70"), Decimal("25"), Decimal("25")
+    ) == Decimal("0")
+
+
+def test_complete_clip_fits_remaining_open_cap(market, now) -> None:
+    """Cheap YES 33.327 @ 0.30 must not quote a $23 NO that would print 33.327 open."""
+    settings = Settings(dry_run=True, mock=True, paper_tape=True)
+    strategy = MakerStrategy(settings)
+    qty = Decimal("33.327")
+    pos = yes_position(qty=str(qty), px="0.30", unpaired_since=now)
+    cost = qty * Decimal("0.30")
+    snap = empty_snapshot(
+        settings,
+        positions={pos.market_ticker: pos},
+        open_notional=cost,
+        unpaired_notional=cost,
+        window_ids=frozenset({pos.event_ticker}),
+    )
+    quotes = strategy.evaluate(market, book("0.3000", "0.6900"), snap, now=now)
+    assert quotes
+    q = quotes[0]
+    if q.kind is IntentKind.COMPLETE_PAIR:
+        assert snap.open_notional + q.notional <= settings.max_open_notional
+        assert q.count <= qty
+    else:
+        assert q.kind is IntentKind.FLATTEN
+        assert q.reason == "open_notional_abort"
+
+
+def test_open_overshoot_maker_flattens_unpaired(market, now) -> None:
+    settings = Settings(dry_run=True, mock=True, paper_tape=True)
+    strategy = MakerStrategy(settings)
+    pos = yes_position(qty="20", px="0.50", unpaired_since=now)
+    snap = empty_snapshot(
+        settings,
+        positions={pos.market_ticker: pos},
+        open_notional=Decimal("33.327"),
+        unpaired_notional=Decimal("10"),
+    )
+    quotes = strategy.evaluate(market, book("0.4700", "0.4800"), snap, now=now)
+    assert len(quotes) == 1
+    assert quotes[0].kind is IntentKind.FLATTEN
+    assert quotes[0].reason == "open_notional_abort"

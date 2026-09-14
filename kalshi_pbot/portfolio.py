@@ -65,8 +65,24 @@ class Portfolio:
                 pos.realized_pnl = Decimal("0")
                 pos.fees = Decimal("0")
 
-    def upsert_resting(self, order: RestingOrder) -> None:
+    def upsert_resting(self, order: RestingOrder, *, enforce_open_cap: bool = True) -> bool:
+        """Register working size. Refuses when reserved+cost would exceed max_open."""
+        if enforce_open_cap:
+            current = self.snapshot().open_notional
+            existing = self.resting.get(order.order_id)
+            if existing is not None:
+                current -= existing.reserved_notional
+            if current + order.reserved_notional > self.settings.max_open_notional:
+                log.info(
+                    "resting_rejected_open_cap",
+                    order_id=order.order_id,
+                    ticker=order.market_ticker,
+                    projected=str(current + order.reserved_notional),
+                    max_open=str(self.settings.max_open_notional),
+                )
+                return False
         self.resting[order.order_id] = order
+        return True
 
     def drop_resting(self, order_id: str) -> RestingOrder | None:
         return self.resting.pop(order_id, None)
@@ -74,8 +90,26 @@ class Portfolio:
     def resting_for(self, ticker: str) -> list[RestingOrder]:
         return [o for o in self.resting.values() if o.market_ticker == ticker]
 
-    def apply_fill(self, fill: Fill) -> None:
+    def apply_fill(self, fill: Fill, *, enforce_open_cap: bool = True) -> bool:
+        """Apply a paper/demo fill. Refuses before mutation if open would exceed max_open."""
         self.reset_day_if_needed()
+        if fill.count <= 0 or fill.price <= 0:
+            return False
+        if enforce_open_cap:
+            projected = self.projected_open_after_fill(fill)
+            if projected > self.settings.max_open_notional:
+                log.info(
+                    "fill_refused_open_cap",
+                    ticker=fill.market_ticker,
+                    order_id=fill.order_id,
+                    projected=str(projected),
+                    max_open=str(self.settings.max_open_notional),
+                    notional=str(fill.price * fill.count),
+                )
+                leftover = self.resting.get(fill.order_id)
+                if leftover:
+                    self.drop_resting(fill.order_id)
+                return False
         self.fills.append(fill)
         pos = self.positions.get(fill.market_ticker)
         if pos is None:
@@ -160,6 +194,41 @@ class Portfolio:
             taker=fill.is_taker,
             unpaired=str(pos.unpaired_qty),
         )
+        return True
+
+    def projected_open_after_fill(self, fill: Fill) -> Decimal:
+        """Gross open (cost + reserved) if this fill is applied, including pairing."""
+        costs = {ticker: pos.cost_basis() for ticker, pos in self.positions.items()}
+        yes_qty = fill.count if fill.outcome is Outcome.YES else Decimal("0")
+        no_qty = fill.count if fill.outcome is Outcome.NO else Decimal("0")
+        yes_cost = fill.price * fill.count if fill.outcome is Outcome.YES else Decimal("0")
+        no_cost = fill.price * fill.count if fill.outcome is Outcome.NO else Decimal("0")
+        pos = self.positions.get(fill.market_ticker)
+        if pos is not None:
+            yes_qty += pos.yes_qty
+            no_qty += pos.no_qty
+            yes_cost += pos.yes_cost
+            no_cost += pos.no_cost
+        paired = min(yes_qty, no_qty)
+        if paired > 0:
+            yes_px = (yes_cost / yes_qty) if yes_qty else Decimal("0")
+            no_px = (no_cost / no_qty) if no_qty else Decimal("0")
+            yes_qty -= paired
+            no_qty -= paired
+            yes_cost -= yes_px * paired
+            no_cost -= no_px * paired
+            if yes_qty <= 0:
+                yes_qty = yes_cost = Decimal("0")
+            if no_qty <= 0:
+                no_qty = no_cost = Decimal("0")
+        costs[fill.market_ticker] = yes_cost + no_cost
+        cost = sum(costs.values(), Decimal("0"))
+        reserved = Decimal("0")
+        for oid, order in self.resting.items():
+            remaining = order.remaining - fill.count if oid == fill.order_id else order.remaining
+            if remaining > 0:
+                reserved += order.price * remaining
+        return reserved + cost
 
     def apply_settlement(
         self,

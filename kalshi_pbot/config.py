@@ -130,6 +130,8 @@ class Settings(BaseSettings):
     cfb_5hz: bool = False
     windows_path: str = "data/windows.json"
     tape_path: str = "data/tape.jsonl"
+    # Daily-loss / manual kill persist so a HUD watchdog restart cannot clear the latch.
+    kill_latch_path: str = "data/kill-latch.json"
 
     log_level: str = "INFO"
     log_json: bool = False

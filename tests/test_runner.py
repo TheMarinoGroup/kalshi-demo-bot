@@ -9,7 +9,8 @@ from websockets.frames import Close
 
 from kalshi_pbot.config import Settings
 from kalshi_pbot.runner import PaperBot
-from kalshi_pbot.types import Fill, IntentKind, Liquidity, Outcome
+from kalshi_pbot.types import Fill, IntentKind, Liquidity, Outcome, PaperFill, RestingOrder
+from tests.conftest import empty_snapshot
 
 
 def test_mock_bot_discovers_and_dry_runs_quotes() -> None:
@@ -254,3 +255,101 @@ async def test_run_survives_closed_ws_during_universe_rollover() -> None:
     assert calls["n"] >= 2
     assert fake.reconnect_calls == 1
     assert fake.subscribe_calls > 1
+
+
+def test_runner_open_overshoot_flattens_without_kill() -> None:
+    """Reserved complete + cheap YES cost (Dig6 33.327) must not latch paper kill."""
+    settings = Settings(mock=True, dry_run=True, paper_tape=True, series="KXBTC15M")
+    bot = PaperBot(settings)
+    bot.universe.refresh()
+    bot.universe.hydrate_books(bot.books)
+    ticker = next(iter(bot.universe.markets))
+    qty = Decimal("33.327")
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    bot.portfolio.apply_fill(
+        Fill(
+            fill_id="cheap-yes",
+            order_id="yes-1",
+            market_ticker=ticker,
+            event_ticker=ticker,
+            outcome=Outcome.YES,
+            price=Decimal("0.30"),
+            count=qty,
+            fee=Decimal("0"),
+            is_taker=False,
+            ts_ms=now_ms,
+        )
+    )
+    bot.portfolio.positions[ticker].unpaired_since = datetime.now(UTC)
+    bot.portfolio.upsert_resting(
+        RestingOrder(
+            order_id="complete-no",
+            client_order_id="complete-no",
+            market_ticker=ticker,
+            event_ticker=ticker,
+            outcome=Outcome.NO,
+            price=Decimal("0.70"),
+            remaining=qty,
+        ),
+        enforce_open_cap=False,
+    )
+    before = bot.portfolio.snapshot()
+    assert before.open_notional > settings.max_open_notional
+    submitted = bot.step()
+    after = bot.portfolio.snapshot()
+    assert not bot.risk.kill_active
+    assert after.open_notional <= settings.max_open_notional
+    assert after.open_notional <= Decimal("10.00") + Decimal("0.05")
+    assert all(o.order_id != "complete-no" for o in after.resting)
+    flats = [q for q in submitted if q.kind is IntentKind.FLATTEN]
+    assert flats
+    assert all(q.reason == "open_notional_abort" for q in flats)
+
+
+def test_runner_skips_paper_fill_that_would_exceed_max_open() -> None:
+    settings = Settings(mock=True, dry_run=True, paper_tape=True, series="KXBTC15M")
+    bot = PaperBot(settings)
+    ticker = "KXBTC15M-MOCK"
+    bot.portfolio.apply_fill(_yes_fill(ticker, count="40", price="0.50"))  # $20
+    assert bot.portfolio.snapshot().open_notional == Decimal("20")
+    paper = PaperFill(
+        order_id="orphan-yes",
+        market_ticker=ticker,
+        event_ticker=ticker,
+        outcome=Outcome.YES,
+        price=Decimal("0.50"),
+        count=Decimal("40"),
+        fee=Decimal("0"),
+        ts_ms=1,
+        latency_ms=150,
+        reason="trade_at_level",
+    )
+    bot.matcher.drain = lambda now_ms: [paper]  # type: ignore[method-assign]
+    bot._drain_matcher(1)
+    snap = bot.portfolio.snapshot()
+    assert snap.open_notional == Decimal("20")
+    assert snap.open_notional <= settings.max_open_notional
+    assert len(bot.portfolio.fills) == 1
+
+
+def test_runner_daily_loss_still_latches_paper() -> None:
+    settings = Settings(mock=True, dry_run=True, paper_tape=True, series="KXBTC15M")
+    bot = PaperBot(settings)
+    bot.universe.refresh()
+    bot.universe.hydrate_books(bot.books)
+    bot.portfolio.realized_pnl = Decimal("-11")
+    submitted = bot.step()
+    assert bot.risk.kill_active
+    assert "daily_loss" in bot.risk.kill_reason
+    assert all(q.kind is IntentKind.FLATTEN or q.reduce_only for q in submitted)
+
+
+def test_runner_restores_daily_kill_latch_on_new_process() -> None:
+    settings = Settings(mock=True, dry_run=True, paper_tape=True, series="KXBTC15M")
+    first = PaperBot(settings)
+    first.risk.maybe_trip_daily(empty_snapshot(settings, daily_pnl=Decimal("-11")))
+    assert first.risk.kill_active
+    second = PaperBot(settings)
+    assert second.risk.kill_active
+    assert "daily_loss" in second.risk.kill_reason
+    assert second.portfolio.kill_active is True

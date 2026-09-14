@@ -263,8 +263,9 @@ def flatten(
 def reset_kill() -> None:
     """Document how to clear a latched kill switch (process restart + this flag)."""
     typer.echo(
-        "The kill switch is in-process. Restart the bot after the daily loss "
-        "is understood. There is no remote reset — that is intentional."
+        "Daily-loss and manual kills stay latched (persisted in data/kill-latch.json) "
+        "until an explicit reset. Watchdog process restart does not clear them. "
+        "Paper-tape open overshoot is refused before register/fill and does not trip kill."
     )
 
 
