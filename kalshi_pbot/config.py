@@ -4,8 +4,10 @@ Three hosts:
 
 * **Data** — public prod REST (no key) for events/books. Research default.
 * **Reconcile-read** — authenticated portfolio GETs (positions, orders, fills,
-  settlements). Follows WS / credential env so view-only prod keys with
-  ``KALSHI_WS_ENV=production`` + ``KALSHI_ALLOW_PROD_WS=1`` hit production REST.
+  settlements) for ``--demo-submit`` / live. Paper-tape soak skips these and
+  treats the exchange book as empty. Live reads follow WS / credential env so
+  view-only prod keys with ``KALSHI_WS_ENV=production`` +
+  ``KALSHI_ALLOW_PROD_WS=1`` hit production REST.
 * **Orders** — demo only. Paper-tape / matcher never POST. ``--demo-submit``
   is the only path that may hit ``POST /portfolio/events/orders``.
 

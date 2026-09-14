@@ -2,14 +2,18 @@
 
 Watchdog restarts the process only. Windows, tape, and the daily-loss
 kill latch persist on disk; paper positions, unpaired inventory, resting
-quotes, and session PnL do not. For demo-submit / live, Kalshi is the
-source of truth — the bot must rebuild risk from GET /portfolio/positions
-and GET /portfolio/orders before quoting.
+quotes, and session PnL do not.
 
-Fail-closed: ready_to_trade stays false on auth, network, partial
+Paper soak (``paper_tape=True`` and not ``live_submit`` / ``--demo-submit``):
+local fills are the source of truth. Treat the exchange portfolio as empty
+and mark READY without authenticated demo/production portfolio GETs.
+View-only production WS keys must not block the paper desk on demo REST 401s.
+
+Demo-submit / live: Kalshi is the source of truth — refuse-until-synced
+against GET /portfolio/positions and GET /portfolio/orders on the real
+host. Fail-closed: ready_to_trade stays false on auth, network, partial
 snapshot errors, or unparseable resting/fill/settlement rows. A 401
-auth/host mismatch is NOT READY / hard hold — do not READY, skip the
-exchange snapshot, or loosen Risk Desk caps. Retry with backoff. Never
+auth/host mismatch is NOT READY / hard hold. Retry with backoff. Never
 quote blind. Daily kill on EXCHANGE SYNC uses today's fills blotter plus
 settlements, not only open-position realized_pnl. Production order POST
 stays refused without ``KALSHI_ALLOW_PRODUCTION=1``.
@@ -134,6 +138,35 @@ def retry_delay_seconds(attempts: int) -> float:
     spread = RECONCILE_RETRY_BASE_SECONDS * (2 ** max(0, attempts - 1))
     jittered = spread * (0.5 + random.random() * 0.5)
     return min(RECONCILE_RETRY_CAP_SECONDS, jittered)
+
+
+def requires_exchange_snapshot(settings: Settings, *, mock: bool = False) -> bool:
+    """True when reconcile must refuse-until-synced against the real host.
+
+    Paper soak (paper_tape, not live_submit) uses the local matcher / tape.
+    Mock books never hit exchange portfolio. Demo-submit and any armed
+    order-submit path stay fail-closed until the snapshot succeeds.
+    """
+    if mock:
+        return False
+    if settings.paper_tape and not settings.live_submit:
+        return False
+    return True
+
+
+def demo_prod_credential_hint(settings: Settings) -> str | None:
+    """One-line hint when demo env is paired with production-only credentials."""
+    if settings.env != "demo" or not settings.has_credentials():
+        return None
+    if settings.ws_env != "production" and not settings.allow_prod_ws:
+        return None
+    if not settings.paper_tape:
+        return None
+    return (
+        "KALSHI_ENV=demo but credentials look production-only "
+        "(KALSHI_WS_ENV=production). Demo REST needs demo API keys; "
+        "paper_tape skips exchange portfolio (local tape is source of truth)."
+    )
 
 
 def may_cancel_orphans(settings: Settings) -> bool:
@@ -591,6 +624,9 @@ class Reconciler:
         self.portfolio.ready_to_trade = False
         if self.execution is not None:
             self.execution.ready_to_trade = False
+        hint = demo_prod_credential_hint(self.settings)
+        if hint:
+            log.info("config_hint", hint=hint)
 
     def maybe_attempt(self, now: datetime | None = None) -> ReconcileState:
         now = now or datetime.now(UTC)
@@ -615,6 +651,7 @@ class Reconciler:
             paper_tape=self.settings.paper_tape,
             live_submit=self.settings.live_submit,
             has_rest=self.rest is not None,
+            skip_exchange=not requires_exchange_snapshot(self.settings, mock=self.mock),
             portfolio_rest=self.settings.resolved_portfolio_rest,
             order_rest=self.settings.resolved_order_rest,
         )
@@ -749,7 +786,15 @@ class Reconciler:
 
     def _fetch_snapshot(self, now: datetime) -> tuple[ExchangeSnapshot, bool]:
         """Return (snapshot, skipped). skipped=True means no exchange read was required."""
-        if self.mock:
+        if not requires_exchange_snapshot(self.settings, mock=self.mock):
+            if self.rest is not None and not self.mock:
+                log.info(
+                    "reconcile_skip_exchange_portfolio",
+                    paper_tape=self.settings.paper_tape,
+                    live_submit=self.settings.live_submit,
+                    portfolio_rest=self.settings.resolved_portfolio_rest,
+                    reason="paper_tape local fills are source of truth",
+                )
             return ExchangeSnapshot(positions=[], orders=[]), True
         if self.rest is None:
             if self.settings.live_submit:
