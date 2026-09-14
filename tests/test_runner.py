@@ -10,6 +10,7 @@ from websockets.frames import Close
 from kalshi_pbot.config import Settings
 from kalshi_pbot.runner import PaperBot
 from kalshi_pbot.types import Fill, IntentKind, Liquidity, Outcome, PaperFill, RestingOrder
+from tests.conftest import empty_snapshot
 
 
 def test_mock_bot_discovers_and_dry_runs_quotes() -> None:
@@ -289,7 +290,8 @@ def test_runner_open_overshoot_flattens_without_kill() -> None:
             outcome=Outcome.NO,
             price=Decimal("0.70"),
             remaining=qty,
-        )
+        ),
+        enforce_open_cap=False,
     )
     before = bot.portfolio.snapshot()
     assert before.open_notional > settings.max_open_notional
@@ -340,3 +342,14 @@ def test_runner_daily_loss_still_latches_paper() -> None:
     assert bot.risk.kill_active
     assert "daily_loss" in bot.risk.kill_reason
     assert all(q.kind is IntentKind.FLATTEN or q.reduce_only for q in submitted)
+
+
+def test_runner_restores_daily_kill_latch_on_new_process() -> None:
+    settings = Settings(mock=True, dry_run=True, paper_tape=True, series="KXBTC15M")
+    first = PaperBot(settings)
+    first.risk.maybe_trip_daily(empty_snapshot(settings, daily_pnl=Decimal("-11")))
+    assert first.risk.kill_active
+    second = PaperBot(settings)
+    assert second.risk.kill_active
+    assert "daily_loss" in second.risk.kill_reason
+    assert second.portfolio.kill_active is True

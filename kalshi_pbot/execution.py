@@ -97,17 +97,16 @@ class ExecutionEngine:
                 }
 
         body = build_order_body(intent)
-        self.portfolio.orders_submitted += 1
 
         if self.live_submit:
+            self.portfolio.orders_submitted += 1
             return self._post_order(intent, body)
 
         oid = str(body["client_order_id"])
         paper_id = f"paper-{oid}" if self.settings.paper_tape else f"dry-{oid}"
-        self.dry_run_orders.append(body)
         # Flatten/reduce-only exits must not count as reserved open (they never add risk).
         if increases_open_risk(intent):
-            self.portfolio.upsert_resting(
+            registered = self.portfolio.upsert_resting(
                 RestingOrder(
                     order_id=paper_id,
                     client_order_id=oid,
@@ -119,6 +118,14 @@ class ExecutionEngine:
                     post_only=bool(body["post_only"]),
                 )
             )
+            if not registered:
+                return {
+                    "ok": False,
+                    "dry_run": True,
+                    "rejected": "open_notional",
+                }
+        self.portfolio.orders_submitted += 1
+        self.dry_run_orders.append(body)
         if self.settings.paper_tape and intent.liquidity is Liquidity.MAKER:
             placed = replace(intent, client_order_id=paper_id)
             now_ms = int(time.time() * 1000)
@@ -178,7 +185,7 @@ class ExecutionEngine:
         if response.status_code == 201:
             order_id = str(payload.get("order_id") or body["client_order_id"])
             remaining = Decimal(str(payload.get("remaining_count") or intent.count))
-            if remaining > 0:
+            if remaining > 0 and increases_open_risk(intent):
                 self.portfolio.upsert_resting(
                     RestingOrder(
                         order_id=order_id,

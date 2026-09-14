@@ -89,6 +89,8 @@ class PaperBot:
         self.mid_history = MidHistory()
         self.hud_hub = None
         self.cfb: dict[str, object] = {}
+        self.risk.restore_persisted_kill()
+        self._sync_kill_flags()
 
     def stop(self) -> None:
         self._stop.set()
@@ -119,7 +121,6 @@ class PaperBot:
             improve_ticks=self.settings.improve_ticks,
             only_quote_underround=self.settings.only_quote_underround,
             clip=str(self.settings.clip),
-            paper_auto_reset_kill=self.settings.paper_auto_reset_kill,
             settle_recycle_s=self.settings.effective_settle_recycle_seconds,
             settle_rare_tail=self.settings.settle_rare_tail,
             hud=self.settings.hud,
@@ -387,15 +388,6 @@ class PaperBot:
             for intent in contained:
                 aged_tickers.add(intent.market_ticker)
 
-        if self.risk.kill_active and self.risk.maybe_reset_paper_kill(snapshot):
-            log.warning(
-                "paper_auto_reset_kill",
-                previous=self.portfolio.kill_reason,
-                open=str(snapshot.open_notional),
-            )
-            self.portfolio.kill_active = False
-            self.portfolio.kill_reason = ""
-
         if self.risk.kill_active:
             emit_metrics(compute_metrics(self.settings, self.portfolio, snapshot))
             self._publish_hud(now)
@@ -513,18 +505,15 @@ class PaperBot:
         fills = self.matcher.drain(now_ms)
         for paper in fills:
             fill = self.matcher.to_portfolio_fill(paper)
-            projected = self.portfolio.projected_open_after_fill(fill)
-            if projected > self.settings.max_open_notional:
+            if not self.portfolio.apply_fill(fill):
                 log.info(
                     "paper_fill_rejected_open_cap",
                     order_id=paper.order_id,
                     ticker=paper.market_ticker,
-                    projected=str(projected),
                     max_open=str(self.settings.max_open_notional),
                     notional=str(paper.price * paper.count),
                 )
                 self.matcher.cancel(paper.order_id, reason="open_notional_cap")
-                self.portfolio.drop_resting(paper.order_id)
                 if self.tape:
                     self.tape.write(
                         "paper_fill_rejected",
@@ -533,11 +522,9 @@ class PaperBot:
                         outcome=paper.outcome.value,
                         price=paper.price,
                         count=paper.count,
-                        projected=projected,
                         reason="open_notional_cap",
                     )
                 continue
-            self.portfolio.apply_fill(fill)
             if self.tape:
                 self.tape.write(
                     "paper_fill",

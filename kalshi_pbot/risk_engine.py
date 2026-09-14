@@ -11,9 +11,11 @@ Post-close paper recycle is ``close_time + settle_recycle_seconds``
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 from kalshi_pbot.config import CLIP_MAX, CLIP_MIN, Settings
 from kalshi_pbot.types import (
@@ -24,8 +26,6 @@ from kalshi_pbot.types import (
     RejectReason,
     RiskDecision,
 )
-
-_INVENTORY_KILL_CODES = frozenset({"open", "one-sided"})
 
 
 def _now(ts: datetime | None) -> datetime:
@@ -168,9 +168,9 @@ def should_abort_open(
     return over_max_open(snapshot, settings)
 
 
-def inventory_kill_resettable(reason: str) -> bool:
-    """Open / one-sided kills may be cleared in paper soak; daily loss may not."""
-    return classify_kill(reason) in _INVENTORY_KILL_CODES
+def persistable_kill_reason(reason: str) -> bool:
+    """Daily-loss and manual latches survive process restart; open/onesided do not."""
+    return classify_kill(reason) in {"loss", "manual"}
 
 
 def classify_kill(reason: str) -> str:
@@ -199,11 +199,60 @@ class RiskEngine:
     def trip(self, reason: str) -> None:
         self.kill_active = True
         self.kill_reason = reason
+        if persistable_kill_reason(reason):
+            self._persist_kill()
+        else:
+            self._clear_persisted_kill()
 
     def reset_kill(self) -> None:
         self.kill_active = False
         self.kill_reason = ""
         self._latched_daily = False
+        self._clear_persisted_kill()
+
+    def restore_persisted_kill(self, now: datetime | None = None) -> bool:
+        """Reload a same-day daily-loss/manual latch. Watchdog restart must not clear it."""
+        path = Path(self.settings.kill_latch_path)
+        if not path.is_file():
+            return False
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        day_raw = str(payload.get("day") or "")
+        reason = str(payload.get("reason") or "")
+        today = (now or datetime.now(UTC)).date().isoformat()
+        if day_raw != today or not persistable_kill_reason(reason):
+            self._clear_persisted_kill()
+            return False
+        self.kill_active = True
+        self.kill_reason = reason
+        self._latched_daily = bool(payload.get("latched_daily")) or classify_kill(reason) == "loss"
+        return True
+
+    def _persist_kill(self) -> None:
+        path = Path(self.settings.kill_latch_path)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "day": datetime.now(UTC).date().isoformat(),
+                        "reason": self.kill_reason,
+                        "latched_daily": self._latched_daily,
+                    }
+                ),
+                encoding="utf-8",
+            )
+        except OSError:
+            return
+
+    def _clear_persisted_kill(self) -> None:
+        path = Path(self.settings.kill_latch_path)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            return
 
     def maybe_trip_daily(self, snapshot: PortfolioSnapshot) -> bool:
         if snapshot.daily_pnl <= -self.settings.daily_loss_limit:
@@ -234,21 +283,6 @@ class RiskEngine:
                 )
                 return True
         return tripped or self.kill_active
-
-    def maybe_reset_paper_kill(self, snapshot: PortfolioSnapshot) -> bool:
-        """Clear an open/onesided latch after flatten. Never clears daily loss."""
-        if not self.settings.paper_auto_reset_kill or not self.kill_active:
-            return False
-        if self._latched_daily or classify_kill(self.kill_reason) == "loss":
-            return False
-        if not inventory_kill_resettable(self.kill_reason):
-            return False
-        if snapshot.open_notional > self.settings.max_open_notional:
-            return False
-        if snapshot.unpaired_notional >= self.settings.max_onesided:
-            return False
-        self.reset_kill()
-        return True
 
     def evaluate(
         self,

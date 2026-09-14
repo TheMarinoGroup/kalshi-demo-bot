@@ -6,7 +6,9 @@ set HUD_URL=http://127.0.0.1:8080/api/health
 set HUD_TITLE=kalshi-paper-hud
 set LOG=data\hud-watchdog.log
 echo Watchdog: desk http://127.0.0.1:8080
-echo If HUD is not healthy on :8080, restarts python -m kalshi_pbot hud
+echo Process survival only. Restarts python -m kalshi_pbot hud if :8080 is not healthy.
+echo Does NOT auto-clear the kill latch (daily-loss persists in data\kill-latch.json).
+echo Does NOT loosen Risk Desk caps (max_open / bankroll / clip stay as configured).
 echo Ctrl+C stops the watchdog (the HUD window may keep running).
 echo %date% %time% watchdog start>> "%LOG%"
 start "" cmd /c "timeout /t 6 /nobreak >nul & start http://127.0.0.1:8080/"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 from kalshi_pbot.config import Settings
 from kalshi_pbot.risk_engine import (
@@ -407,21 +408,34 @@ def test_complete_pair_cannot_push_open_past_max(now: datetime) -> None:
     assert flatten.allowed
 
 
-def test_paper_auto_reset_clears_open_kill_not_daily(settings: Settings, now: datetime) -> None:
-    armed = settings.model_copy(update={"paper_auto_reset_kill": True, "paper_tape": False})
-    engine = RiskEngine(armed)
-    over = empty_snapshot(armed, open_notional=Decimal("55"))
-    engine.maybe_trip_limits(over)
+def test_daily_loss_kill_persists_across_engine_restart(settings: Settings) -> None:
+    engine = RiskEngine(settings)
+    engine.maybe_trip_daily(empty_snapshot(settings, daily_pnl=Decimal("-21")))
+    assert engine.kill_active
+    assert Path(settings.kill_latch_path).is_file()
+    restored = RiskEngine(settings)
+    assert restored.restore_persisted_kill() is True
+    assert restored.kill_active
+    assert classify_kill(restored.kill_reason) == "loss"
+    restored.reset_kill()
+    fresh = RiskEngine(settings)
+    assert fresh.restore_persisted_kill() is False
+    assert not fresh.kill_active
+
+
+def test_open_kill_is_not_persisted(now: datetime) -> None:
+    settings = Settings(
+        bankroll=Decimal("1000"),
+        dry_run=True,
+        mock=True,
+        paper_tape=False,
+        max_windows=2,
+    )
+    engine = RiskEngine(settings)
+    engine.maybe_trip_limits(empty_snapshot(settings, open_notional=Decimal("55")))
     assert engine.kill_active
     assert classify_kill(engine.kill_reason) == "open"
-    under = empty_snapshot(armed, open_notional=Decimal("10"))
-    assert engine.maybe_reset_paper_kill(under) is True
-    assert not engine.kill_active
-
-    daily = RiskEngine(armed)
-    loss = empty_snapshot(armed, daily_pnl=Decimal("-21"))
-    daily.maybe_trip_limits(loss)
-    assert daily.kill_active
-    assert classify_kill(daily.kill_reason) == "loss"
-    assert daily.maybe_reset_paper_kill(empty_snapshot(armed)) is False
-    assert daily.kill_active
+    assert not Path(settings.kill_latch_path).is_file()
+    other = RiskEngine(settings)
+    assert other.restore_persisted_kill() is False
+    assert not other.kill_active

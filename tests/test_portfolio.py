@@ -181,6 +181,62 @@ def test_projected_open_after_resting_fill_pairs_down(settings: Settings) -> Non
     assert port.projected_open_after_fill(fill) == Decimal("0")
 
 
+def _fill(*, count: str, price: str, order_id: str = "a", ticker: str = "T") -> Fill:
+    return Fill(
+        fill_id=order_id,
+        order_id=order_id,
+        market_ticker=ticker,
+        event_ticker=ticker,
+        outcome=Outcome.YES,
+        price=Decimal(price),
+        count=Decimal(count),
+        fee=Decimal("0"),
+        is_taker=False,
+        ts_ms=1,
+    )
+
+
+def test_apply_fill_refuses_before_option_b_max_open() -> None:
+    port = Portfolio(Settings(dry_run=True, mock=True, paper_tape=True))
+    assert port.settings.max_open_notional == Decimal("25.00")
+    assert port.apply_fill(_fill(count="40", price="0.50")) is True
+    assert port.snapshot().open_notional == Decimal("20")
+    assert port.apply_fill(_fill(count="40", price="0.50", order_id="b")) is False
+    assert port.snapshot().open_notional == Decimal("20")
+    assert len(port.fills) == 1
+
+
+def test_apply_fill_refuses_before_v1_max_open(settings: Settings) -> None:
+    port = Portfolio(settings)
+    assert port.settings.max_open_notional == Decimal("50.00")
+    assert port.apply_fill(_fill(count="80", price="0.50")) is True
+    assert port.snapshot().open_notional == Decimal("40")
+    assert port.apply_fill(_fill(count="40", price="0.50", order_id="b")) is False
+    assert port.snapshot().open_notional == Decimal("40")
+    assert len(port.fills) == 1
+
+
+def test_upsert_resting_refuses_when_reserved_would_exceed_cap() -> None:
+    from kalshi_pbot.types import RestingOrder
+
+    port = Portfolio(Settings(dry_run=True, mock=True, paper_tape=True))
+    assert port.apply_fill(_fill(count="40", price="0.50")) is True
+    ok = port.upsert_resting(
+        RestingOrder(
+            order_id="too-big",
+            client_order_id="too-big",
+            market_ticker="T",
+            event_ticker="T",
+            outcome=Outcome.NO,
+            price=Decimal("0.50"),
+            remaining=Decimal("20"),
+        )
+    )
+    assert ok is False
+    assert "too-big" not in port.resting
+    assert port.snapshot().open_notional == Decimal("20")
+
+
 def test_sell_yes_maps_to_ask() -> None:
     from kalshi_pbot.execution import build_order_body, flatten_intent
     from kalshi_pbot.types import Outcome

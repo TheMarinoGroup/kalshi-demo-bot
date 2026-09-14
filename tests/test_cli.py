@@ -35,3 +35,7 @@ def test_watch_hud_bat_restarts_unhealthy_desk() -> None:
     assert "restarting" in text
     after_loop = text[text.index(":loop") :]
     assert "python -m kalshi_pbot hud" in after_loop
+    assert "Does NOT auto-clear the kill latch" in text
+    assert "Does NOT loosen Risk Desk caps" in text
+    assert "kill-latch.json" in text
+    assert "max_open" in text

@@ -73,7 +73,7 @@ modules (`tape`, `expectancy`) plus the dry-run / paper-tape path.
 | Last 60s before `close_time` | no new risk floor; cancel / flatten only | config (paper-v2 uses 120s) |
 | Paper recycle after close | 75s default (60–90s band; p99≈59s) | `KALSHI_SETTLE_RECYCLE_SECONDS` |
 | Rare-tail settle lock | off; 300s if enabled | `KALSHI_SETTLE_RARE_TAIL` — **not** `expected_expiration` |
-| Kill switch | paper-tape: daily loss latches; open/onesided overshoot hard-rejects + flattens without latching the soak | — |
+| Kill switch | daily loss latches (persists across HUD restart). Open overshoot is **refused before register/fill** and does not trip kill in paper-tape | — |
 
 Change `KALSHI_BANKROLL` and the percentage limits move with it. Paper only.
 
@@ -162,14 +162,12 @@ Later soak pass bar (paper): **0 daily-loss kills**; `day_pnl_net > 0` over
 **Open-notional overshoot (Dig6).** A $10 clip can still print `open_notional
 33.327 >= 25.00` if a cheap YES fill (many contracts) is completed with a
 same-count rich NO bid: reserved + cost ≈ qty × $1 until the pair prints.
-Risk Desk now **rejects before registration** if projected open would exceed
-`max_open`. Completing quotes are sized to remaining capacity (never a full
-unpaired dump past the cap). In **paper-tape**, an open (or onesided) breach
-**cancels + flattens back under the cap** and does **not** latch the daily
-kill — only **daily loss** freezes the soak. Optional
-`KALSHI_PAPER_AUTO_RESET_KILL=true` clears an open/onesided latch after
-flatten (never daily loss); default `false` because paper-tape no longer
-latches those reasons.
+**Primary control:** refuse the register and the fill **before** it sticks if
+projected open would exceed `max_open` (Option B $25 / v1 $50). Completing
+quotes are sized to remaining capacity. Kill-after-breach is not the control.
+Paper-tape does **not** trip kill on open overshoot and does **not** auto-reset
+any kill. Only **daily loss** (and HUD manual) freeze the soak, and that latch
+is persisted so a watchdog process restart cannot clear it.
 
 ## Paper matcher
 
@@ -313,7 +311,7 @@ python -m kalshi_pbot hud --mock
 
 On Windows, `start-hud.bat` cds to the repo, opens the desk in a browser after ~4s, and runs `python -m kalshi_pbot hud` once.
 
-`watch-hud.bat` is the overnight soak launcher: every 15s it hits `/api/health` on `:8080`, and if the desk is not healthy it kills the old HUD window and restarts `python -m kalshi_pbot hud`, appending each restart to `data/hud-watchdog.log`. Use this when a process exit should auto-recover. It does **not** clear a daily-loss kill (that lives in-process until restart anyway).
+`watch-hud.bat` is process survival only: every 15s it hits `/api/health` on `:8080`, and if the desk is not healthy it restarts `python -m kalshi_pbot hud`, appending each restart to `data/hud-watchdog.log`. It does **not** change Risk Desk caps. It does **not** auto-clear the kill latch — daily-loss / manual kills persist in `data/kill-latch.json` and are restored on startup.
 
 Open **http://127.0.0.1:8080**. Frontend is Vite + React, served by the
 bot's FastAPI process (`/api/snapshot`, `/ws`). For UI hot-reload:

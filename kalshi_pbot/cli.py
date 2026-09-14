@@ -195,10 +195,6 @@ def status() -> None:
         f"soft_onesided    ${settings.soft_onesided}  "
         f"(flatten; hard kill ${settings.max_onesided})"
     )
-    typer.echo(
-        f"paper_reset_kill {settings.paper_auto_reset_kill}  "
-        "(open/onesided latch only; never daily loss)"
-    )
     typer.echo(f"only_underround  {settings.only_quote_underround}")
     typer.echo(f"last_seconds     {settings.last_seconds}  (Risk Desk floor 60s)")
     typer.echo(
@@ -267,9 +263,9 @@ def flatten(
 def reset_kill() -> None:
     """Document how to clear a latched kill switch (process restart + this flag)."""
     typer.echo(
-        "The kill switch is in-process. Daily-loss kills stay latched until restart. "
-        "Paper-tape open/onesided overshoot flattens without latching; "
-        "KALSHI_PAPER_AUTO_RESET_KILL=true also clears those latches after flatten."
+        "Daily-loss and manual kills stay latched (persisted in data/kill-latch.json) "
+        "until an explicit reset. Watchdog process restart does not clear them. "
+        "Paper-tape open overshoot is refused before register/fill and does not trip kill."
     )
 
 
