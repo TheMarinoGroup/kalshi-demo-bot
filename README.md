@@ -13,7 +13,9 @@ local matcher, and a JSONL tape. Default mode is **dry-run + paper-tape**.
 
 This is still demo/paper only. Production *order* hosts are refused unless you
 set both `KALSHI_ENV=production` and `KALSHI_ALLOW_PRODUCTION=1`. Public prod
-REST (no key) is the **data** default.
+REST (no key) is the **data** default. Authenticated **portfolio reconcile**
+GETs follow the WS / credential env (`KALSHI_WS_ENV` / `KALSHI_ALLOW_PROD_WS`)
+and do **not** enable order POST.
 
 HTTP **429** is a rate limit: the bot retries public REST with backoff (honors
 `Retry-After`). Wait a minute if you just hammered `/events` before restarting
@@ -198,7 +200,7 @@ CLI (kalshi-pbot) ── runner.PaperBot
 
 | Module | Role |
 | --- | --- |
-| `kalshi_pbot/config.py` | Dual plane, latency buckets, settle recycle (not expected_expiration) |
+| `kalshi_pbot/config.py` | Data / reconcile-read / order-write hosts; latency buckets; settle recycle |
 | `kalshi_pbot/kalshi_client.py` | Public `/events` + books; auth WS; order POST refused in paper-tape |
 | `kalshi_pbot/market_data.py` | Events-first rollover, book snapshot/delta, implied asks |
 | `kalshi_pbot/windows.py` | Persist / reload 15m windows |
@@ -239,12 +241,18 @@ cp .env.example .env
 
 Public **prod** market data (events, books) needs **no key**.
 
-Authenticated WS (demo or read-only prod) and `--demo-submit` need a **demo**
-account at [https://demo.kalshi.co/](https://demo.kalshi.co/):
+Authenticated WS (demo or read-only prod) and `--demo-submit` need API keys.
+Demo orders use a [demo](https://demo.kalshi.co/) key. View-only **production**
+keys can drive read-only prod WS plus portfolio reconcile:
 
 1. Account & security → API Keys → Create Key.
 2. Store the key id and the downloaded `.key` file **outside git**.
 3. Read-only prod WS additionally requires `KALSHI_ALLOW_PROD_WS=1`.
+4. With `KALSHI_ENV=demo` (orders stay demo) and
+   `KALSHI_WS_ENV=production` + `KALSHI_ALLOW_PROD_WS=1`, startup reconcile
+   GETs (`/portfolio/positions`, orders, fills, settlements) hit **production**
+   REST. `POST /portfolio/events/orders` still uses demo hosts and stays
+   refused without `KALSHI_ALLOW_PRODUCTION=1`.
 
 ```bash
 # .env
@@ -326,8 +334,8 @@ A process restart (watchdog, crash, `Ctrl+C`) does **not** reconstruct in-memory
 What used to live only in RAM (and still does, until reconcile runs): paper positions, unpaired inventory, resting quotes, session PnL. **Before this feature, a paper restart lost that book.** After this feature:
 
 1. `ready_to_trade=false` until reconcile completes. The HUD shows **SYNCING** vs **READY**. A failed fetch is **NOT READY · HARD HOLD** (never a silent empty book). Flatten/cancel of known inventory is allowed; **all new risk is refused**.
-2. With credentials, the bot fetches **GET `/portfolio/positions`**, **GET `/portfolio/orders?status=resting`**, **GET `/portfolio/fills?min_ts=today`**, and **GET `/portfolio/settlements?min_ts=today`** before any new quotes and rebuilds `PortfolioSnapshot` (open, onesided, windows, and daily PnL from today's fills blotter + settled same-day PnL — not only open-position `realized_pnl`). Unparseable resting rows fail closed (**NOT READY · HARD HOLD**). Option B / v1 caps and Dig6 unpaired-age / soft abort still apply on that rebuilt state.
-3. Auth / network / partial responses **fail closed**: stay NOT READY / hard hold, log `reconcile_failed`, retry with backoff. Do not quote blind and do not present an unverified empty book as flat.
+2. With credentials, the bot fetches **GET `/portfolio/positions`**, **GET `/portfolio/orders?status=resting`**, **GET `/portfolio/fills?min_ts=today`**, and **GET `/portfolio/settlements?min_ts=today`** on the **reconcile-read** host (production REST when `KALSHI_WS_ENV=production` / `KALSHI_ALLOW_PROD_WS=1`; otherwise demo, matching the order plane). It rebuilds `PortfolioSnapshot` (open, onesided, windows, and daily PnL from today's fills blotter + settled same-day PnL — not only open-position `realized_pnl`). Unparseable resting rows fail closed (**NOT READY · HARD HOLD**). Option B / v1 caps and Dig6 unpaired-age / soft abort still apply on that rebuilt state.
+3. Auth / network / partial responses **fail closed**: stay NOT READY / hard hold, log `reconcile_failed`, retry with backoff. A **401** is reported as an **auth/host mismatch** (credentials vs REST host). Do not quote blind and do not present an unverified empty book as flat.
 4. Paper-tape / mock without exchange inventory: best-effort rebuild from *today's* tape + windows, labeled **PAPER LOCAL**. An empty exchange snapshot plus that local restore may mark ready. Pre-reconcile paper restarts still lose any in-memory fills that never hit the tape.
 5. If the exchange returns positions or resting orders, the label is **EXCHANGE SYNC** and the tape is not mixed in (would double-count).
 6. Cancel-orphan policy is **off by default**. Unexpected resting orders on watched series are adopted into the local book and logged. `KALSHI_CANCEL_ORPHANS=true` may cancel them only on `--demo-submit` against demo hosts. Production never auto-cancels, even with the flag.

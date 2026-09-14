@@ -8,10 +8,10 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from kalshi_pbot.config import Settings
+from kalshi_pbot.config import DEMO_REST, PROD_REST, Settings
 from kalshi_pbot.execution import ExecutionEngine
 from kalshi_pbot.hud_state import MidHistory, build_snapshot
-from kalshi_pbot.kalshi_client import PAGINATE_MAX_PAGES
+from kalshi_pbot.kalshi_client import PAGINATE_MAX_PAGES, KalshiClient, KalshiRestClient
 from kalshi_pbot.portfolio import Portfolio
 from kalshi_pbot.reconcile import (
     SOURCE_EXCHANGE_SYNC,
@@ -329,11 +329,19 @@ def test_api_error_fail_closed_no_quotes() -> None:
     state = rec.attempt()
     assert state.ready_to_trade is False
     assert state.status == STATUS_NOT_READY
+    assert state.source == ""
+    assert state.source != SOURCE_PAPER_LOCAL
     assert "401" in state.error or "HTTPStatusError" in state.error
+    assert "auth/host mismatch" in state.error
+    assert "Reconcile-read host" in state.error
     assert rec.portfolio.positions == {}
     assert rec.portfolio.resting == {}
     assert rec.portfolio.ready_to_trade is False
     assert engine.ready_to_trade is False
+    assert settings.allow_production is False
+    assert settings.max_open_notional == Decimal("25.00")
+    assert settings.max_onesided == Decimal("15.00")
+    assert settings.daily_loss_limit == Decimal("10.00")
     result = engine.submit(
         QuoteIntent(
             market_ticker="KXBTC15M-T",
@@ -349,6 +357,7 @@ def test_api_error_fail_closed_no_quotes() -> None:
     hud = rec.state.as_hud(cancel_orphans=False)
     assert hud["hard_hold"] is True
     assert hud["book_verified"] is False
+    assert "auth/host mismatch" in str(hud["error"])
     flat = engine.submit(_flatten_intent())
     assert flat.get("error") != "not_ready"
     assert engine.dry_run_orders
@@ -856,3 +865,117 @@ def test_paper_reconcile_never_posts_and_allow_production_stays_off() -> None:
     bot.step()
     assert bot.settings.allow_production is False
     assert bot.execution.live_submit is False
+
+
+def test_prod_read_reconcile_hits_prod_portfolio_urls_not_demo_order() -> None:
+    settings = _settings(
+        env="demo",
+        ws_env="production",
+        allow_prod_ws=True,
+        allow_production=False,
+    )
+    assert settings.resolved_portfolio_rest == PROD_REST
+    assert settings.resolved_order_rest == DEMO_REST
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        path = request.url.path
+        if path.endswith("/portfolio/positions"):
+            return httpx.Response(200, json={"market_positions": [], "cursor": None})
+        if path.endswith("/portfolio/orders"):
+            return httpx.Response(200, json={"orders": [], "cursor": None})
+        if path.endswith("/portfolio/fills"):
+            return httpx.Response(200, json={"fills": [], "cursor": None})
+        if path.endswith("/portfolio/settlements"):
+            return httpx.Response(200, json={"settlements": [], "cursor": None})
+        return httpx.Response(404, json={"error": path})
+
+    transport = httpx.MockTransport(handler)
+    http = httpx.Client(transport=transport)
+    rest = KalshiRestClient(
+        settings,
+        base_url=settings.resolved_portfolio_rest,
+        purpose="portfolio",
+        http=http,
+        sleep=lambda _: None,
+    )
+    rest._headers = lambda method, url, authenticated: {"Accept": "application/json"}  # type: ignore[method-assign]
+    rec = _reconciler(settings, rest)
+    try:
+        state = rec.attempt()
+    finally:
+        rest.close()
+    assert state.ready_to_trade is True
+    assert seen
+    assert any("/portfolio/positions" in url for url in seen)
+    assert any("/portfolio/orders" in url for url in seen)
+    assert any("/portfolio/fills" in url for url in seen)
+    assert any("/portfolio/settlements" in url for url in seen)
+    for url in seen:
+        assert "external-api.kalshi.com" in url
+        assert "demo.kalshi" not in url
+
+
+def test_kalshi_client_splits_portfolio_read_from_order_write() -> None:
+    settings = Settings(ws_env="production", allow_prod_ws=True)
+    client = KalshiClient(settings)
+    try:
+        assert client.portfolio_rest.base_url == PROD_REST
+        assert client.portfolio_rest.purpose == "portfolio"
+        assert client.rest.base_url == DEMO_REST
+        assert client.rest.purpose == "order"
+        assert client.data.base_url == PROD_REST
+    finally:
+        client.close()
+    paper = Settings()
+    assert paper.resolved_portfolio_rest == DEMO_REST
+    assert paper.resolved_order_rest == DEMO_REST
+    assert paper.resolved_data_rest == PROD_REST
+
+
+def test_cancel_orphans_refused_when_portfolio_is_prod() -> None:
+    settings = _settings(
+        cancel_orphans=True,
+        paper_tape=False,
+        dry_run=False,
+        ws_env="production",
+        allow_prod_ws=True,
+    )
+    assert may_cancel_orphans(settings) is False
+
+
+def test_paper_bot_wires_prod_portfolio_read_and_demo_order_write() -> None:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+    bot = PaperBot(
+        Settings(
+            env="demo",
+            ws_env="production",
+            allow_prod_ws=True,
+            allow_production=False,
+            mock=False,
+            dry_run=True,
+            paper_tape=True,
+            api_key_id="view-only-prod",
+            private_key=pem,
+        )
+    )
+    try:
+        assert bot.reconcile.rest is bot.client.portfolio_rest
+        assert bot.reconcile.rest is not None
+        assert bot.reconcile.rest.base_url == PROD_REST
+        assert bot.execution.rest is bot.client.rest
+        assert bot.execution.rest is not None
+        assert bot.execution.rest.base_url == DEMO_REST
+        assert bot.settings.allow_production is False
+        assert bot.execution.live_submit is False
+    finally:
+        bot.client.close()

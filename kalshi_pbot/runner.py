@@ -56,7 +56,8 @@ class PaperBot:
         self.settings = settings
         if settings.mock:
             self.client: KalshiClient | MockKalshiClient = MockKalshiClient(settings)
-            rest: KalshiRestClient | None = None
+            order_rest: KalshiRestClient | None = None
+            portfolio_rest: KalshiRestClient | None = None
         else:
             if settings.live_submit and not settings.has_credentials():
                 raise RuntimeError(
@@ -64,7 +65,8 @@ class PaperBot:
                     "Use --dry-run or --mock, or set credentials."
                 )
             self.client = KalshiClient(settings)
-            rest = self.client.rest if settings.has_credentials() else None
+            order_rest = self.client.rest if settings.has_credentials() else None
+            portfolio_rest = self.client.portfolio_rest if settings.has_credentials() else None
             if not settings.has_credentials():
                 log.warning(
                     "public_data_only",
@@ -78,7 +80,7 @@ class PaperBot:
         self.portfolio = Portfolio(settings)
         self.risk = RiskEngine(settings)
         self.execution = ExecutionEngine(
-            settings, self.portfolio, rest, matcher=self.matcher, tape=self.tape
+            settings, self.portfolio, order_rest, matcher=self.matcher, tape=self.tape
         )
         self.universe = MarketUniverse(settings, self.client)
         self.books = OrderBookStore()
@@ -86,12 +88,13 @@ class PaperBot:
         self.pair_arb = PairArbStrategy(settings)
         self.reconcile = Reconciler(
             settings,
-            rest=rest,
+            rest=portfolio_rest,
             portfolio=self.portfolio,
             tape=self.tape,
             execution=self.execution,
             universe=self.universe,
             mock=isinstance(self.client, MockKalshiClient),
+            order_rest=order_rest,
         )
         self.reconcile.order_books = self.books
         self._stop = asyncio.Event()
@@ -111,6 +114,7 @@ class PaperBot:
             "bot_start",
             env=self.settings.env,
             data_rest=self.settings.resolved_data_rest,
+            portfolio_rest=self.settings.resolved_portfolio_rest,
             order_rest=self.settings.resolved_order_rest,
             ws=self.settings.resolved_ws_url,
             dry_run=self.settings.dry_run,

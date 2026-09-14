@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from kalshi_pbot.config import Settings
+from kalshi_pbot.config import DEMO_REST, PROD_REST, Settings
 from kalshi_pbot.execution import ExecutionEngine
 from kalshi_pbot.kalshi_client import KalshiRestClient
 from kalshi_pbot.portfolio import Portfolio
@@ -58,8 +58,26 @@ def test_create_order_raises_in_paper_tape() -> None:
 def test_create_order_raises_on_data_client() -> None:
     settings = Settings(paper_tape=False, dry_run=False)
     client = KalshiRestClient(settings, purpose="data")
-    with pytest.raises(RuntimeError, match="demo order REST"):
+    with pytest.raises(RuntimeError, match="order-write REST"):
         client.create_order({"ticker": "X"})
+
+
+def test_create_order_blocked_on_prod_without_allow_production() -> None:
+    settings = Settings(
+        ws_env="production",
+        allow_prod_ws=True,
+        paper_tape=False,
+        dry_run=False,
+    )
+    assert settings.resolved_order_rest == DEMO_REST
+    read = KalshiRestClient(
+        settings, base_url=settings.resolved_portfolio_rest, purpose="portfolio"
+    )
+    with pytest.raises(RuntimeError, match="order-write REST"):
+        read.create_order({"ticker": "X"})
+    order = KalshiRestClient(settings, base_url=PROD_REST, purpose="order")
+    with pytest.raises(RuntimeError, match="ALLOW_PRODUCTION"):
+        order.create_order({"ticker": "X"})
 
 
 def test_submit_rejects_when_projected_open_exceeds_cap() -> None:
