@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 from pathlib import Path
 from typing import Any
 
@@ -70,7 +71,7 @@ def create_app(bot: Any, hub: HudHub, history: MidHistory) -> FastAPI:
     def _require_hitl_token(request: Request) -> None:
         expected = str(getattr(bot.settings, "desk_token", "") or "")
         got = request.headers.get("x-desk-token") or request.cookies.get("desk_token") or ""
-        if not expected or got != expected:
+        if not expected or not hmac.compare_digest(got, expected):
             raise HTTPException(status_code=401, detail="HITL requires X-Desk-Token")
         if bot.settings.live_submit and not getattr(
             bot.settings, "desk_token_from_operator", False

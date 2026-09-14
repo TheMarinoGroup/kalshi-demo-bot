@@ -236,6 +236,37 @@ def test_hitl_post_requires_token() -> None:
     assert ok.json()["decision"] == "deny"
 
 
+def test_hitl_wrong_token_is_401() -> None:
+    bot = _underround_bot(desk_mode="HITL")
+    bot.step()
+    intent_id = bot.hitl.pending_payloads()[0]["intent_id"]
+    client = TestClient(create_app(bot, HudHub(), MidHistory()))
+    res = client.post(
+        f"/v0/hitl/{intent_id}",
+        json={"decision": "approve"},
+        headers={"X-Desk-Token": "not-the-desk-token"},
+    )
+    assert res.status_code == 401
+    assert not bot.execution.dry_run_orders
+
+
+def test_hitl_cors_does_not_allow_foreign_origin() -> None:
+    bot = _underround_bot(desk_mode="HITL")
+    client = TestClient(create_app(bot, HudHub(), MidHistory()))
+    res = client.options(
+        "/v0/hitl/intent",
+        headers={
+            "Origin": "http://evil.example",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type,x-desk-token",
+        },
+    )
+    assert res.headers.get("access-control-allow-origin") not in {
+        "*",
+        "http://evil.example",
+    }
+
+
 def test_hitl_demo_submit_refuses_without_operator_token() -> None:
     settings = Settings(
         mock=True,
@@ -260,6 +291,27 @@ def test_hitl_demo_submit_refuses_without_operator_token() -> None:
     )
     assert res.status_code == 403
     assert not bot.execution.dry_run_orders
+    snap = build_snapshot(bot, MidHistory())
+    assert not snap.get("desk_token")
+    assert "desk_token" not in client.get("/v0/state").json()
+
+
+def test_demo_submit_snapshot_hides_operator_token() -> None:
+    settings = Settings(
+        mock=True,
+        dry_run=False,
+        paper_tape=False,
+        series="KXBTC15M",
+        desk_mode="HITL",
+        desk_token="operator-secret-token",
+    )
+    assert settings.live_submit is True
+    assert settings.desk_token_from_operator is True
+    bot = PaperBot(settings)
+    snap = build_snapshot(bot, MidHistory())
+    assert snap.get("desk_token") == ""
+    state = TestClient(create_app(bot, HudHub(), MidHistory())).get("/v0/state").json()
+    assert "desk_token" not in state
 
 
 def test_approve_after_deadline_is_timeout_deny() -> None:
