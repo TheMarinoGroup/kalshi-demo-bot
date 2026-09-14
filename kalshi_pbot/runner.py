@@ -37,7 +37,7 @@ from kalshi_pbot.risk_engine import (
     should_abort_unpaired,
     unpaired_abort_reason,
 )
-from kalshi_pbot.strategy.maker import MakerStrategy
+from kalshi_pbot.strategy.maker import MakerStrategy, is_underround
 from kalshi_pbot.strategy.pair_arb import PairArbStrategy
 from kalshi_pbot.tape import JsonlTape
 from kalshi_pbot.types import (
@@ -532,7 +532,16 @@ class PaperBot:
             book = self.books.get(item.market_ticker)
             if market is None or book is None:
                 continue
-            committed = self._commit_intent(item.quote, market, book, snapshot, now)
+            quote = self._refresh_approved_quote(item.quote, market, book, snapshot)
+            if quote is None:
+                log.info(
+                    "hitl_stale_signal",
+                    ticker=item.market_ticker,
+                    intent_id=item.intent_id,
+                    reason="underround_or_book",
+                )
+                continue
+            committed = self._commit_intent(quote, market, book, snapshot, now)
             if committed:
                 submitted.append(committed)
                 snapshot = self.portfolio.snapshot(books)
@@ -560,6 +569,30 @@ class PaperBot:
         snapshot = self._flush_approved_hitl(snapshot, books, now, submitted, set())
         self._publish_hud(now)
         return record, submitted
+
+    def _refresh_approved_quote(
+        self,
+        original: QuoteIntent,
+        market: MarketWindow,
+        book: OrderBook,
+        snapshot,
+    ) -> QuoteIntent | None:
+        """Rebuild an approved ENTRY against the live book. Stale underround → None."""
+        if original.kind is not IntentKind.ENTRY:
+            return original
+        if self.settings.only_quote_underround and not is_underround(
+            book, self.settings.min_edge
+        ):
+            return None
+        fresh = self.maker._quote_side(
+            market,
+            book,
+            original.outcome,
+            kind=IntentKind.ENTRY,
+            reason=original.reason or "hitl_approved",
+            snapshot=snapshot,
+        )
+        return fresh
 
     def _commit_intent(
         self,

@@ -169,6 +169,8 @@ class HitlDesk:
         item = self.pending.get(intent_id)
         if item is None:
             raise KeyError(intent_id)
+        if now >= item.expires_at:
+            return self._timeout_item(item, now)
         if raw == "approve":
             item.status = "approved"
             self.approved[intent_id] = item
@@ -192,23 +194,28 @@ class HitlDesk:
     def expire(self, now: datetime | None = None) -> list[HITLDecision]:
         now = _now(now)
         expired: list[HITLDecision] = []
-        for intent_id, item in list(self.pending.items()):
+        for item in list(self.pending.values()):
             if item.expires_at > now:
                 continue
-            item.status = "timeout_deny"
-            item.size["blocked_by"] = BLOCKED_HITL
-            self.blocked[_fingerprint(item.quote)] = intent_id
-            self.pending.pop(intent_id, None)
-            record = HITLDecision(
-                intent_id=intent_id,
-                decision="timeout_deny",
-                actor="atlas",
-                ts=now.isoformat(),
-            )
-            dumped = record.model_dump()
-            self.decisions.append(dumped)
-            expired.append(record)
+            expired.append(self._timeout_item(item, now))
         return expired
+
+    def _timeout_item(self, item: PendingHitl, now: datetime) -> HITLDecision:
+        intent_id = item.intent_id
+        item.status = "timeout_deny"
+        item.size["blocked_by"] = BLOCKED_HITL
+        self.blocked[_fingerprint(item.quote)] = intent_id
+        self.pending.pop(intent_id, None)
+        self.approved.pop(intent_id, None)
+        record = HITLDecision(
+            intent_id=intent_id,
+            decision="timeout_deny",
+            actor="atlas",
+            ts=now.isoformat(),
+        )
+        dumped = record.model_dump()
+        self.decisions.append(dumped)
+        return record
 
     def take_approved(self, intent_id: str | None = None) -> list[PendingHitl]:
         if intent_id is not None:
