@@ -64,12 +64,25 @@ def test_one_sided_quotes_wider_spread(settings: Settings, market) -> None:
 
 def test_prefers_completing_incomplete_pair(settings: Settings, market) -> None:
     strategy = MakerStrategy(settings)
-    pos = yes_position()
+    pos = yes_position(qty="20", px="0.50")  # $10 — at soft cap, still complete
     snap = empty_snapshot(settings, positions={pos.market_ticker: pos})
     quotes = strategy.evaluate(market, book("0.4700", "0.4800"), snap)
     assert len(quotes) == 1
     assert quotes[0].outcome is Outcome.NO
     assert quotes[0].kind is IntentKind.COMPLETE_PAIR
+
+
+def test_complete_other_side_after_touch_stays_one_sided(settings: Settings, market, now) -> None:
+    assert settings.quote_mode == "one_sided"
+    assert settings.improve_ticks == 0
+    strategy = MakerStrategy(settings)
+    pos = yes_position(qty="20", px="0.50", unpaired_since=now)  # $10, at soft cap
+    snap = empty_snapshot(settings, positions={pos.market_ticker: pos})
+    quotes = strategy.evaluate(market, book("0.4700", "0.4800"), snap, now=now)
+    assert len(quotes) == 1
+    assert quotes[0].kind is IntentKind.COMPLETE_PAIR
+    assert quotes[0].outcome is Outcome.NO
+    assert quotes[0].post_only
 
 
 def test_two_sided_emits_both_when_join_sum_below_one(settings: Settings, market) -> None:
@@ -111,9 +124,11 @@ def test_no_new_onesided_when_unpaired_exists_other_ticker(
 
 
 def test_unpaired_age_abort_flattens(settings: Settings, market, now) -> None:
-    settings = settings.model_copy(update={"max_unpaired_age_seconds": 90})
+    settings = settings.model_copy(
+        update={"max_unpaired_age_seconds": 45, "soft_onesided": Decimal("30")}
+    )
     strategy = MakerStrategy(settings)
-    pos = yes_position(unpaired_since=now - timedelta(seconds=120))
+    pos = yes_position(qty="20", px="0.50", unpaired_since=now - timedelta(seconds=45))
     snap = empty_snapshot(settings, positions={pos.market_ticker: pos})
     quotes = strategy.evaluate(market, book("0.4700", "0.4800"), snap, now=now)
     assert len(quotes) == 1
@@ -124,9 +139,21 @@ def test_unpaired_age_abort_flattens(settings: Settings, market, now) -> None:
     assert quotes[0].liquidity is Liquidity.TAKER
 
 
+def test_soft_onesided_abort_flattens_without_kill(settings: Settings, market, now) -> None:
+    strategy = MakerStrategy(settings)
+    assert settings.soft_onesided == Decimal("10")
+    pos = yes_position(qty="30", px="0.50", unpaired_since=now)  # $15 > $10
+    snap = empty_snapshot(settings, positions={pos.market_ticker: pos})
+    quotes = strategy.evaluate(market, book("0.4700", "0.4800"), snap, now=now)
+    assert len(quotes) == 1
+    assert quotes[0].kind is IntentKind.FLATTEN
+    assert quotes[0].reason == "unpaired_soft_abort"
+    assert quotes[0].outcome is Outcome.YES
+
+
 def test_unpaired_cannot_complete_flattens(settings: Settings, market, now) -> None:
     strategy = MakerStrategy(settings)
-    pos = yes_position(unpaired_since=now)
+    pos = yes_position(qty="20", px="0.50", unpaired_since=now)
     snap = empty_snapshot(settings, positions={pos.market_ticker: pos})
     # Completing NO cannot post: implied NO ask is 0.01 (yes bid 0.99).
     quotes = strategy.evaluate(market, book("0.9900", "0.0100"), snap, now=now)
@@ -137,9 +164,9 @@ def test_unpaired_cannot_complete_flattens(settings: Settings, market, now) -> N
 
 
 def test_fresh_unpaired_still_prefers_complete(settings: Settings, market, now) -> None:
-    settings = settings.model_copy(update={"max_unpaired_age_seconds": 90})
+    settings = settings.model_copy(update={"max_unpaired_age_seconds": 45})
     strategy = MakerStrategy(settings)
-    pos = yes_position(unpaired_since=now - timedelta(seconds=10))
+    pos = yes_position(qty="20", px="0.50", unpaired_since=now - timedelta(seconds=10))
     snap = empty_snapshot(settings, positions={pos.market_ticker: pos})
     quotes = strategy.evaluate(market, book("0.4700", "0.4800"), snap, now=now)
     assert len(quotes) == 1
@@ -166,7 +193,7 @@ def test_only_quote_underround_skips_overround(settings: Settings, market, now) 
 def test_only_quote_underround_still_completes(settings: Settings, market, now) -> None:
     settings = settings.model_copy(update={"only_quote_underround": True})
     strategy = MakerStrategy(settings)
-    pos = yes_position(unpaired_since=now)
+    pos = yes_position(qty="20", px="0.50", unpaired_since=now)
     snap = empty_snapshot(settings, positions={pos.market_ticker: pos})
     overround = book("0.5100", "0.5000")
     quotes = strategy.evaluate(market, overround, snap, now=now)

@@ -111,7 +111,8 @@ def test_runner_age_aborts_unpaired() -> None:
         mock=True,
         dry_run=True,
         series="KXBTC15M",
-        max_unpaired_age_seconds=90,
+        max_unpaired_age_seconds=45,
+        soft_onesided=Decimal("30"),
     )
     bot = PaperBot(settings)
     bot.universe.refresh()
@@ -119,10 +120,27 @@ def test_runner_age_aborts_unpaired() -> None:
     ticker = next(iter(bot.universe.markets))
     bot.portfolio.apply_fill(_yes_fill(ticker))
     pos = bot.portfolio.positions[ticker]
-    pos.unpaired_since = datetime.now(UTC) - timedelta(seconds=180)
+    pos.unpaired_since = datetime.now(UTC) - timedelta(seconds=46)
 
     submitted = bot.step()
     flats = [q for q in submitted if q.kind is IntentKind.FLATTEN]
     assert flats
     assert all(q.reason == "unpaired_age_abort" for q in flats)
     assert pos.unpaired_qty > 0
+
+
+def test_runner_soft_onesided_aborts_without_kill() -> None:
+    settings = Settings(mock=True, dry_run=True, series="KXBTC15M", clip_dollars=Decimal("10"))
+    bot = PaperBot(settings)
+    bot.universe.refresh()
+    bot.universe.hydrate_books(bot.books)
+    ticker = next(iter(bot.universe.markets))
+    bot.portfolio.apply_fill(_yes_fill(ticker, count="30", price="0.50"))  # $15
+    pos = bot.portfolio.positions[ticker]
+    pos.unpaired_since = datetime.now(UTC)
+
+    submitted = bot.step()
+    flats = [q for q in submitted if q.kind is IntentKind.FLATTEN]
+    assert flats
+    assert all(q.reason == "unpaired_soft_abort" for q in flats)
+    assert not bot.risk.kill_active

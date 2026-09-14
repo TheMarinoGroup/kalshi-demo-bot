@@ -77,7 +77,7 @@ def test_snapshot_must_show_panels_from_mock_bot() -> None:
     assert win["floor_strike"] == 65000
     assert win["bid_sum"] == 0.97  # 0.48 + 0.49
     assert win["ask_sum"] == 1.03
-    assert win["underround"] is True
+    assert win["underround"] is False  # 0.97 > 1 − 0.04 paper-v2 min_edge
     assert win["arb_taker_eligible"] is False
     assert win["arb"] is False  # must not flash green ARB for underround
     assert win["yes_bid_sz"] == 40

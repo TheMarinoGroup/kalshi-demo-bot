@@ -34,12 +34,17 @@ DAILY_LOSS_FRAC = Decimal("0.02")  # $20 at $1000
 ONESIDED_FRAC = Decimal("0.03")  # $30 at $1000
 MAX_CONCURRENT_WINDOWS = 2
 LAST_SECONDS_NO_RISK = 60
+# Paper-v2-tight: no new risk earlier than the Risk Desk 60s floor.
+PAPER_V2_LAST_SECONDS = 120
 # Soft abort: flatten unpaired inventory before the $30 hard onesided kill.
 # 0 disables age abort (hard cap + last-60s flatten still apply).
-DEFAULT_MAX_UNPAIRED_AGE_SECONDS = 90
+DEFAULT_MAX_UNPAIRED_AGE_SECONDS = 45
+# Soft onesided flatten / no-grow preference. Hard kill stays ONESIDED_FRAC ($30).
+DEFAULT_SOFT_ONESIDED = Decimal("10")
 CLIP_MIN = Decimal("10")
 CLIP_MAX = Decimal("30")
 DEFAULT_CLIP = Decimal("20")
+DEFAULT_MIN_EDGE = Decimal("0.04")
 DEFAULT_SERIES = ("KXBTC15M", "KXETH15M")
 # Measured close→settlement_ts on public REST, N=8000 finalized
 # KXBTC15M+KXETH15M: p50≈7s, p90≈12s, p99≈59s. ~99% settle within 60s.
@@ -95,7 +100,7 @@ class Settings(BaseSettings):
     hud_port: int = 8080
     clip_dollars: Decimal = DEFAULT_CLIP
     quote_mode: QuoteMode = "one_sided"
-    min_edge: Decimal = Decimal("0.02")
+    min_edge: Decimal = DEFAULT_MIN_EDGE
     taker_pair_arb: bool = False
     tick_size: Decimal = Decimal("0.01")
     improve_ticks: int = 0
@@ -106,7 +111,7 @@ class Settings(BaseSettings):
     # GET /events for KXBTC15M then KXETH15M in a tight loop.
     discover_series_delay: float = 0.4
     tob_heartbeat_ms: int = 100
-    last_seconds: int = LAST_SECONDS_NO_RISK
+    last_seconds: int = PAPER_V2_LAST_SECONDS
     # Paper capital velocity: recycle after close + this many seconds.
     # Default 75s sits in the 60–90s band (covers ~p99). Not expected_expiration.
     settle_recycle_seconds: int = SETTLE_RECYCLE_SECONDS
@@ -116,7 +121,9 @@ class Settings(BaseSettings):
     max_windows: int = MAX_CONCURRENT_WINDOWS
     # Soft preference: flatten unpaired after this many seconds (not a Risk Desk kill).
     max_unpaired_age_seconds: int = DEFAULT_MAX_UNPAIRED_AGE_SECONDS
-    # Soft preference: skip new ENTRY unless bid_sum < 1 − min_edge (Regime B).
+    # Soft preference: flatten / refuse growth above this notional (hard kill stays $30).
+    soft_onesided: Decimal = DEFAULT_SOFT_ONESIDED
+    # Soft preference: skip new ENTRY unless bid_sum ≤ 1 − min_edge (Regime B).
     only_quote_underround: bool = False
     cfb_5hz: bool = False
     windows_path: str = "data/windows.json"
@@ -127,7 +134,9 @@ class Settings(BaseSettings):
 
     http_timeout: float = 15.0
 
-    @field_validator("bankroll", "clip_dollars", "min_edge", "tick_size", mode="before")
+    @field_validator(
+        "bankroll", "clip_dollars", "min_edge", "tick_size", "soft_onesided", mode="before"
+    )
     @classmethod
     def _decimalize(cls, value: object) -> Decimal:
         return D(value)
@@ -151,6 +160,14 @@ class Settings(BaseSettings):
             raise ValueError("settle_rare_tail_seconds must be positive")
         if self.max_unpaired_age_seconds < 0:
             raise ValueError("max_unpaired_age_seconds must be >= 0")
+        if self.soft_onesided < 0:
+            raise ValueError("soft_onesided must be >= 0")
+        if self.last_seconds < LAST_SECONDS_NO_RISK:
+            raise ValueError(
+                f"last_seconds must be >= {LAST_SECONDS_NO_RISK} (Risk Desk v1 floor)"
+            )
+        if self.improve_ticks < 0:
+            raise ValueError("improve_ticks must be >= 0")
         if self.max_windows < 1:
             raise ValueError("max_windows must be >= 1")
         if self.min_window_minutes < MIN_WINDOW_MINUTES:

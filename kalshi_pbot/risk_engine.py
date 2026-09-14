@@ -102,19 +102,38 @@ def unpaired_age_seconds(pos: Position, now: datetime | None = None) -> float | 
     return (_now(now) - _aware(pos.unpaired_since)).total_seconds()
 
 
+def over_soft_onesided(pos: Position, settings: Settings) -> bool:
+    """True when unpaired notional is strictly above the soft $10 preference."""
+    if pos.unpaired_qty <= 0 or settings.soft_onesided <= 0:
+        return False
+    return pos.unpaired_notional() > settings.soft_onesided
+
+
 def should_abort_unpaired(
     pos: Position,
     settings: Settings,
     now: datetime | None = None,
 ) -> bool:
-    """Soft age abort. Does not trip the $30 onesided kill."""
+    """Soft flatten: age or notional over the $10 preference. Does not trip the $30 kill."""
     if pos.unpaired_qty <= 0:
         return False
+    if over_soft_onesided(pos, settings):
+        return True
     max_age = settings.max_unpaired_age_seconds
     if max_age <= 0:
         return False
     age = unpaired_age_seconds(pos, now)
     return age is not None and age >= max_age
+
+
+def unpaired_abort_reason(
+    pos: Position,
+    settings: Settings,
+    now: datetime | None = None,
+) -> str:
+    if over_soft_onesided(pos, settings):
+        return "unpaired_soft_abort"
+    return "unpaired_age_abort"
 
 
 def classify_kill(reason: str) -> str:

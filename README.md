@@ -68,7 +68,7 @@ modules (`tape`, `expectancy`) plus the dry-run / paper-tape path.
 | Max concurrent 15m windows | 2 | config |
 | Daily loss kill (realized + fees + unsettled MTM) | $20 | 2% of bankroll |
 | Max incomplete / one-sided inventory | $30 | 3% of bankroll |
-| Last 60s before `close_time` | no new risk; cancel / flatten only | config |
+| Last 60s before `close_time` | no new risk floor; cancel / flatten only | config (paper-v2-tight uses 120s) |
 | Paper recycle after close | 75s default (60–90s band; p99≈59s) | `KALSHI_SETTLE_RECYCLE_SECONDS` |
 | Rare-tail settle lock | off; 300s if enabled | `KALSHI_SETTLE_RARE_TAIL` — **not** `expected_expiration` |
 | Kill switch | cancel resting, block entries until process restart | — |
@@ -78,9 +78,10 @@ Change `KALSHI_BANKROLL` and the percentage limits move with it. Paper only.
 ## Strategy notes
 
 **Maker-first (default).** Resting limit bids, `post_only` when the V2 events
-API accepts it, STP `taker_at_cross`. Quote **one side** unless
-`KALSHI_QUOTE_MODE=two_sided`. Completing an incomplete pair is always
-preferred over opening a new one-sided clip.
+API accepts it, STP `taker_at_cross`. Quote **one side**
+(`KALSHI_QUOTE_MODE=one_sided`; do not switch to `two_sided` unless Risk
+later OK). After any fill, completing the other side is the only quote
+until the pair is done or unpaired is aborted.
 
 Maker fee on these series is believed **$0** (`fee_type=quadratic`). The bot
 logs **fee drag** on every paper fill. Quadratic maker = $0 is **pending
@@ -99,20 +100,28 @@ demo-fill confirmation** (`pending_demo_confirm=true` in logs).
 `expected_expiration`. Unsettled MTM still counts toward the daily kill
 until recycle. Completing an incomplete pair is always preferred over a
 new one-sided clip. Unpaired inventory is aborted on age
-(`KALSHI_MAX_UNPAIRED_AGE_SECONDS`, default 90s) or when the completing
-side cannot be quoted — not only at the $30 onesided kill. A new
-one-sided clip is refused while unpaired inventory exists on any other
-window/ticker. Last 60s: cancel quotes; do not complete pairs; flatten
-unpaired if a bid exists.
+(`KALSHI_MAX_UNPAIRED_AGE_SECONDS`, default 45s), when unpaired notional
+is **above** the soft $10 preference (`KALSHI_SOFT_ONESIDED`), or when
+the completing side cannot be quoted — not only at the $30 onesided
+kill. A $10 clip at the soft cap is still completed; growth past $10 is
+flattened. A new one-sided clip is refused while unpaired inventory
+exists on any other window/ticker. Last 120s (config; Risk Desk floor
+60s): cancel quotes; do not complete pairs; flatten unpaired if a bid
+exists.
 
-### Overnight soak lesson (paper)
+### Overnight soak lesson + paper-v2-tight (paper)
 
 A paper overnight soak tripped **onesided ≥ $30** with `day_pnl_net` ≈
 −$24.7 (unrealized ≈ −$25.5, realized +$0.76, fees ≈ $0). The loss was
 **unpaired one-sided MTM**, not taker fees. Do not warehouse leftover
 YES or NO across windows; finish or flatten the open clip first.
 
-Recommended **paper profit-retry** env (still dry-run / paper-tape; no
+**Paper-v2-tight** keeps `QUOTE_MODE=one_sided` and completes the other
+side after any touch. Soft preferences (not kills): onesided abort above
+$10, unpaired age 45s, no-new-risk last 120s, `MIN_EDGE=0.04`
+(`bid_sum ≤ 0.96`).
+
+Recommended **paper-v2-tight** env (still dry-run / paper-tape; no
 production orders):
 
 ```bash
@@ -121,16 +130,22 @@ KALSHI_PAPER_TAPE=true
 KALSHI_SERIES=KXBTC15M
 KALSHI_MAX_WINDOWS=1
 KALSHI_CLIP_DOLLARS=10
-KALSHI_MIN_EDGE=0.04
-KALSHI_MAX_UNPAIRED_AGE_SECONDS=90
-KALSHI_ONLY_QUOTE_UNDERROUND=true
 KALSHI_QUOTE_MODE=one_sided
+KALSHI_IMPROVE_TICKS=0
+KALSHI_TAKER_PAIR_ARB=false
+KALSHI_MIN_EDGE=0.04
+KALSHI_LAST_SECONDS=120
+KALSHI_MAX_UNPAIRED_AGE_SECONDS=45
+KALSHI_SOFT_ONESIDED=10
+KALSHI_ONLY_QUOTE_UNDERROUND=true
 ```
 
-`max_windows=1` + BTC-only is single-series friendly. Soft knobs
-(`max_unpaired_age_seconds`, `only_quote_underround`) can be stricter
-than Risk Desk v1 hard caps; they do not raise or disable the $30 / $50 /
-$20 kills.
+`max_windows=1` + BTC-only is single-series friendly. Soft knobs can be
+stricter than Risk Desk v1 hard caps; they do not raise or disable the
+$30 / $50 / $20 kills.
+
+Later soak pass bar (paper): **0 kills**; `day_pnl_net > 0` over
+**≥ 96 BTC windows**; incomplete-pair **< 10%**; peak onesided **≤ $10**.
 
 ## Paper matcher
 

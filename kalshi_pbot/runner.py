@@ -27,6 +27,7 @@ from kalshi_pbot.risk_engine import (
     recycle_ready,
     seconds_since_close,
     should_abort_unpaired,
+    unpaired_abort_reason,
 )
 from kalshi_pbot.strategy.maker import MakerStrategy
 from kalshi_pbot.strategy.pair_arb import PairArbStrategy
@@ -98,6 +99,11 @@ class PaperBot:
             onesided=str(self.settings.max_onesided),
             max_windows=self.settings.max_windows,
             max_unpaired_age_s=self.settings.max_unpaired_age_seconds,
+            soft_onesided=str(self.settings.soft_onesided),
+            last_seconds=self.settings.last_seconds,
+            min_edge=str(self.settings.min_edge),
+            quote_mode=self.settings.quote_mode,
+            improve_ticks=self.settings.improve_ticks,
             only_quote_underround=self.settings.only_quote_underround,
             clip=str(self.settings.clip),
             settle_recycle_s=self.settings.effective_settle_recycle_seconds,
@@ -288,7 +294,13 @@ class PaperBot:
         aged_tickers: set[str] = set()
         for market in self._aged_unpaired_markets(snapshot, now):
             aged_tickers.add(market.ticker)
-            flat = self._flatten_window(market, snapshot, now, reason="unpaired_age_abort")
+            pos = snapshot.positions.get(market.ticker)
+            reason = (
+                unpaired_abort_reason(pos, self.settings, now)
+                if pos
+                else "unpaired_age_abort"
+            )
+            flat = self._flatten_window(market, snapshot, now, reason=reason)
             if flat:
                 submitted.append(flat)
             snapshot = self.portfolio.snapshot(books)

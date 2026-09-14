@@ -1,11 +1,11 @@
 """Maker-first quoting for 15-minute crypto Up/Down markets.
 
 Default is one-sided: join (or optionally improve) the bid on a single
-outcome, preferring the side that completes an incomplete pair. If the
-completing quote cannot be posted, or unpaired inventory exceeds
-``max_unpaired_age_seconds``, flatten instead of sitting on MTM. New
-one-sided clips are skipped while another window is unpaired. Two-sided
-mode is available but still post_only and never crosses the implied ask.
+outcome. After any fill, the only quote is the completing side. Flatten
+if unpaired notional is above ``soft_onesided`` ($10), age exceeds
+``max_unpaired_age_seconds`` (45s), or the completing quote cannot be
+posted. New one-sided clips are skipped while another window is unpaired.
+Two-sided mode exists but is not the paper-v2-tight path.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
 
 from kalshi_pbot.config import Settings
 from kalshi_pbot.execution import flatten_intent
-from kalshi_pbot.risk_engine import should_abort_unpaired
+from kalshi_pbot.risk_engine import should_abort_unpaired, unpaired_abort_reason
 from kalshi_pbot.types import (
     IntentKind,
     Liquidity,
@@ -103,7 +103,7 @@ def _position(snapshot: PortfolioSnapshot, ticker: str) -> Position | None:
 def is_underround(book: OrderBook, min_edge: Decimal) -> bool:
     """True when yes_bid + no_bid is strictly inside 1 − min_edge (Regime B)."""
     bid_sum = book.bid_sum()
-    return bid_sum is not None and bid_sum < Decimal("1") - min_edge
+    return bid_sum is not None and bid_sum <= Decimal("1") - min_edge
 
 
 def _foreign_unpaired(snapshot: PortfolioSnapshot, ticker: str) -> bool:
@@ -185,21 +185,25 @@ class MakerStrategy:
         now: datetime,
     ) -> list[QuoteIntent]:
         completing = Outcome.NO if unpaired is Outcome.YES else Outcome.YES
-        aged = should_abort_unpaired(pos, self.settings, now)
+        abort = should_abort_unpaired(pos, self.settings, now)
         complete = self._quote_side(
             market,
             book,
             completing,
             kind=IntentKind.COMPLETE_PAIR,
             reason="complete_incomplete_pair",
-            improve_ticks=self.settings.improve_ticks + 1,
+            improve_ticks=self.settings.improve_ticks,
         )
-        if complete is not None and not aged:
+        if complete is not None and not abort:
             return [complete]
-        flatten = self._flatten_unpaired(market, book, pos, unpaired, aged=aged)
+        reason = (
+            unpaired_abort_reason(pos, self.settings, now)
+            if abort
+            else "unpaired_cannot_complete"
+        )
+        flatten = self._flatten_unpaired(market, book, pos, unpaired, reason=reason)
         if flatten is not None:
             return [flatten]
-        # Age abort without a bid: still refuse to sit idle — return nothing new.
         return [complete] if complete else []
 
     def _flatten_unpaired(
@@ -209,7 +213,7 @@ class MakerStrategy:
         pos: Position,
         unpaired: Outcome,
         *,
-        aged: bool,
+        reason: str,
     ) -> QuoteIntent | None:
         bid = book.best_yes_bid() if unpaired is Outcome.YES else book.best_no_bid()
         if bid is None or pos.unpaired_qty <= 0:
@@ -221,7 +225,6 @@ class MakerStrategy:
             pos.unpaired_qty,
             bid,
         )
-        reason = "unpaired_age_abort" if aged else "unpaired_cannot_complete"
         return QuoteIntent(
             market_ticker=intent.market_ticker,
             event_ticker=intent.event_ticker,

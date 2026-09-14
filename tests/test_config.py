@@ -25,7 +25,13 @@ def test_defaults_are_paper_data_plane() -> None:
     assert settings.effective_settle_recycle_seconds == 75
     assert settings.settle_rare_tail is False
     assert settings.max_windows == 2
-    assert settings.max_unpaired_age_seconds == 90
+    assert settings.max_unpaired_age_seconds == 45
+    assert settings.soft_onesided == Decimal("10")
+    assert settings.last_seconds == 120
+    assert settings.min_edge == Decimal("0.04")
+    assert settings.quote_mode == "one_sided"
+    assert settings.improve_ticks == 0
+    assert settings.taker_pair_arb is False
     assert settings.only_quote_underround is False
 
 
@@ -66,9 +72,14 @@ def test_unpaired_age_and_windows_validation() -> None:
     assert Settings(max_unpaired_age_seconds=0).max_unpaired_age_seconds == 0
     with pytest.raises(ValueError, match="max_unpaired_age_seconds"):
         Settings(max_unpaired_age_seconds=-1)
+    with pytest.raises(ValueError, match="soft_onesided"):
+        Settings(soft_onesided=Decimal("-1"))
+    with pytest.raises(ValueError, match="last_seconds"):
+        Settings(last_seconds=59)
     with pytest.raises(ValueError, match="max_windows"):
         Settings(max_windows=0)
     assert Settings(max_windows=1, series="KXBTC15M").max_windows == 1
+    assert Settings(last_seconds=60).last_seconds == 60
 
 
 def test_clip_clamped() -> None:

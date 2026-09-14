@@ -191,8 +191,12 @@ def status() -> None:
     typer.echo(f"max_onesided     ${settings.max_onesided}  (3%)")
     typer.echo(f"max_windows      {settings.max_windows}")
     typer.echo(f"unpaired_age_s   {settings.max_unpaired_age_seconds}  (soft abort; 0=off)")
+    typer.echo(
+        f"soft_onesided    ${settings.soft_onesided}  "
+        f"(flatten; hard kill ${settings.max_onesided})"
+    )
     typer.echo(f"only_underround  {settings.only_quote_underround}")
-    typer.echo(f"last_seconds     {settings.last_seconds}")
+    typer.echo(f"last_seconds     {settings.last_seconds}  (Risk Desk floor 60s)")
     typer.echo(
         f"settle_recycle   {settings.effective_settle_recycle_seconds}s  "
         f"(close→settlement p99≈59s; not expected_expiration)"
