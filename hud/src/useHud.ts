@@ -1,9 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
+import { withPreviewActivity } from "./preview";
 import type { HudSnapshot } from "./types";
 
 function wsUrl(): string {
   const proto = window.location.protocol === "https:" ? "wss" : "ws";
   return `${proto}://${window.location.host}/ws`;
+}
+
+function previewOn(): boolean {
+  return new URLSearchParams(window.location.search).has("preview");
 }
 
 export function useHud(): {
@@ -15,6 +20,9 @@ export function useHud(): {
   const [snap, setSnap] = useState<HudSnapshot | null>(null);
   const [live, setLive] = useState(false);
   const [clock, setClock] = useState(() => new Date());
+  const decorate = useCallback((data: HudSnapshot) => {
+    return previewOn() ? withPreviewActivity(data) : data;
+  }, []);
 
   useEffect(() => {
     const id = window.setInterval(() => setClock(new Date()), 250);
@@ -27,7 +35,7 @@ export function useHud(): {
     let poll: number | undefined;
 
     const apply = (data: HudSnapshot) => {
-      if (!closed) setSnap(data);
+      if (!closed) setSnap(decorate(data));
     };
 
     const startPoll = () => {
@@ -46,12 +54,12 @@ export function useHud(): {
     const connect = () => {
       socket = new WebSocket(wsUrl());
       socket.onopen = () => setLive(true);
-      socket.onmessage = (ev) => apply(JSON.parse(ev.data) as HudSnapshot);
       socket.onclose = () => {
         setLive(false);
         if (!closed) window.setTimeout(connect, 1200);
       };
       socket.onerror = () => socket?.close();
+      socket.onmessage = (ev) => apply(JSON.parse(ev.data) as HudSnapshot);
     };
 
     startPoll();
@@ -61,7 +69,7 @@ export function useHud(): {
       if (poll) window.clearInterval(poll);
       socket?.close();
     };
-  }, []);
+  }, [decorate]);
 
   const tripKill = useCallback(async () => {
     const res = await fetch("/api/kill", {
