@@ -34,6 +34,17 @@ log = structlog.get_logger(__name__)
 WS_SIGN_PATH = "/trade-api/ws/v2"
 JsonDict = dict[str, Any]
 WsHandler = Callable[[JsonDict], Awaitable[None] | None]
+OnConnect = Callable[[], Awaitable[None] | None]
+WS_RECONNECT_CAP_SECONDS = 30.0
+
+
+def is_ws_disconnect(exc: BaseException) -> bool:
+    """True for a dead / closing socket (keepalive timeout, send-on-closed, etc.)."""
+    if isinstance(exc, websockets.exceptions.ConnectionClosed):
+        return True
+    if isinstance(exc, websockets.exceptions.InvalidState):
+        return True
+    return isinstance(exc, RuntimeError) and "not connected" in str(exc).lower()
 
 # Public /events (and similar GETs) can 429. Retry discovery-friendly:
 # ~5–8 attempts, start 1–2s, cap 30–60s. Honor Retry-After when present.
@@ -383,11 +394,37 @@ class KalshiWebSocket:
         self._ws: Any = None
         self._msg_id = 1
         self._handlers: list[WsHandler] = []
+        self._on_connect: list[OnConnect] = []
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
+        self._lock = asyncio.Lock()
 
     def add_handler(self, handler: WsHandler) -> None:
         self._handlers.append(handler)
+
+    def add_on_connect(self, callback: OnConnect) -> None:
+        """Invoked after every successful connect, including run_forever reconnects."""
+        self._on_connect.append(callback)
+
+    @property
+    def is_connected(self) -> bool:
+        if self._ws is None:
+            return False
+        if self._task is not None and self._task.done():
+            return False
+        return self._socket_open()
+
+    def _socket_open(self) -> bool:
+        ws = self._ws
+        if ws is None:
+            return False
+        state = getattr(ws, "state", None)
+        if state is not None:
+            name = getattr(state, "name", None) or str(state)
+            return str(name).removeprefix("State.") == "OPEN"
+        if getattr(ws, "closed", False):
+            return False
+        return getattr(ws, "close_code", None) is None
 
     def _auth_headers(self) -> dict[str, str]:
         if self._key is None:
@@ -401,6 +438,19 @@ class KalshiWebSocket:
         }
 
     async def connect(self) -> None:
+        async with self._lock:
+            if self.is_connected:
+                return
+            await self._detach_unlocked()
+            await self._open_unlocked()
+
+    async def reconnect(self) -> None:
+        """Close a dead socket and open a new one. Shared by run_forever and subscribe."""
+        async with self._lock:
+            await self._detach_unlocked()
+            await self._open_unlocked()
+
+    async def _open_unlocked(self) -> None:
         headers = self._auth_headers()
         self._ws = await websockets.connect(
             self.settings.resolved_ws_url,
@@ -410,13 +460,26 @@ class KalshiWebSocket:
         self._stop.clear()
         self._task = asyncio.create_task(self._read_loop(), name="kalshi-ws")
 
+    async def _detach_unlocked(self) -> None:
+        task = self._task
+        self._task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if self._ws is not None:
+            try:
+                await self._ws.close()
+            except Exception:
+                log.debug("ws_close_failed")
+            self._ws = None
+
     async def close(self) -> None:
         self._stop.set()
-        if self._task:
-            self._task.cancel()
-        if self._ws is not None:
-            await self._ws.close()
-            self._ws = None
+        async with self._lock:
+            await self._detach_unlocked()
 
     async def subscribe(
         self,
@@ -447,7 +510,7 @@ class KalshiWebSocket:
         await self._send({"id": self._next_id(), "cmd": "update_subscription", "params": params})
 
     async def _send(self, payload: JsonDict) -> None:
-        if self._ws is None:
+        if self._ws is None or not self._socket_open():
             raise RuntimeError("WebSocket is not connected")
         await self._ws.send(json.dumps(payload))
 
@@ -456,10 +519,18 @@ class KalshiWebSocket:
         self._msg_id += 1
         return mid
 
+    async def _notify_on_connect(self) -> None:
+        for callback in self._on_connect:
+            result = callback()
+            if asyncio.iscoroutine(result):
+                await result
+
     async def _read_loop(self) -> None:
-        assert self._ws is not None
+        ws = self._ws
+        if ws is None:
+            return
         try:
-            async for raw in self._ws:
+            async for raw in ws:
                 try:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
@@ -480,14 +551,21 @@ class KalshiWebSocket:
             try:
                 await self.connect()
                 delay = 1.0
+                await self._notify_on_connect()
                 if self._task:
                     await self._task
+                if not self._stop.is_set():
+                    log.warning("ws_reader_stopped")
             except asyncio.CancelledError:
-                raise
+                if self._stop.is_set():
+                    raise
+                log.info("ws_reconnect", reason="cancelled")
             except Exception:
+                if self._stop.is_set():
+                    raise
                 log.exception("ws_reconnect", delay=delay)
                 await asyncio.sleep(delay)
-                delay = min(delay * 2, 30.0)
+                delay = min(delay * 2, WS_RECONNECT_CAP_SECONDS)
 
 
 class KalshiClient:

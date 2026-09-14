@@ -12,7 +12,12 @@ import structlog
 from kalshi_pbot.config import Settings
 from kalshi_pbot.execution import ExecutionEngine, flatten_intent
 from kalshi_pbot.hud_state import MidHistory, build_snapshot
-from kalshi_pbot.kalshi_client import KalshiClient, KalshiRestClient, MockKalshiClient
+from kalshi_pbot.kalshi_client import (
+    KalshiClient,
+    KalshiRestClient,
+    MockKalshiClient,
+    is_ws_disconnect,
+)
 from kalshi_pbot.market_data import (
     MarketUniverse,
     OrderBookStore,
@@ -130,10 +135,12 @@ class PaperBot:
             )
 
         ws = getattr(self.client, "ws", None)
+        ws_forever: asyncio.Task[None] | None = None
         if ws is not None and self.settings.has_credentials() and not self.settings.mock:
             ws.add_handler(self._on_ws)
-            await ws.connect()
-            await self._resubscribe()
+            # run_forever owns connect + backoff reconnect; on_connect restores subs.
+            ws.add_on_connect(self._subscribe_channels)
+            ws_forever = asyncio.create_task(ws.run_forever(), name="kalshi-ws-forever")
 
         while not self._stop.is_set():
             now = datetime.now(UTC)
@@ -141,7 +148,7 @@ class PaperBot:
                 prev = set(self.universe.markets)
                 self.universe.refresh(now=now)
                 self.universe.hydrate_books(self.books)
-                if set(self.universe.markets) != prev and ws is not None and ws._ws is not None:
+                if set(self.universe.markets) != prev and ws is not None:
                     await self._resubscribe()
                 last_discover = now.timestamp()
             self.step(now=now)
@@ -154,10 +161,16 @@ class PaperBot:
             hud_task.cancel()
         if ws is not None:
             await ws.close()
+        if ws_forever is not None and not ws_forever.done():
+            ws_forever.cancel()
+            try:
+                await ws_forever
+            except asyncio.CancelledError:
+                pass
         self.client.close()
         log.info("bot_stop")
 
-    async def _resubscribe(self) -> None:
+    async def _subscribe_channels(self) -> None:
         ws = getattr(self.client, "ws", None)
         if ws is None:
             return
@@ -181,6 +194,29 @@ class PaperBot:
             channels=["orderbook_delta", "trade", "ticker", "market_lifecycle_v2", *cfb],
             index_ids=self.settings.cfb_index_ids(),
         )
+
+    async def _resubscribe(self) -> None:
+        """Subscribe current universe. On a dead socket: reconnect and continue."""
+        try:
+            await self._subscribe_channels()
+            return
+        except Exception as exc:
+            if not is_ws_disconnect(exc):
+                log.exception("ws_resubscribe_failed")
+                return
+            log.warning(
+                "ws_resubscribe_disconnected",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+        ws = getattr(self.client, "ws", None)
+        if ws is None:
+            return
+        try:
+            await ws.reconnect()
+            await self._subscribe_channels()
+        except Exception:
+            log.exception("ws_reconnect_failed")
 
     def _on_ws(self, message: dict) -> None:
         kind = message.get("type")
