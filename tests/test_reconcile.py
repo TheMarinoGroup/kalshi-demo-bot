@@ -36,17 +36,27 @@ class FakeRest:
         positions: list[dict] | None = None,
         orders: list[dict] | None = None,
         *,
+        fills: list[dict] | None = None,
+        settlements: list[dict] | None = None,
         error: Exception | None = None,
         fail_orders: bool = False,
+        fail_fills: bool = False,
+        fail_settlements: bool = False,
         cancel_status: int = 200,
     ) -> None:
         self.positions = positions if positions is not None else []
         self.orders = orders if orders is not None else []
+        self.fills = fills if fills is not None else []
+        self.settlements = settlements if settlements is not None else []
         self.error = error
         self.fail_orders = fail_orders
+        self.fail_fills = fail_fills
+        self.fail_settlements = fail_settlements
         self.cancel_status = cancel_status
         self.cancelled: list[tuple[str, str]] = []
         self.created_orders: list[dict] = []
+        self.fill_min_ts: int | None = None
+        self.settlement_min_ts: int | None = None
 
     def list_market_positions(self) -> list[dict]:
         if self.error:
@@ -59,6 +69,22 @@ class FakeRest:
         if self.fail_orders:
             raise RuntimeError("orders endpoint failed")
         return list(self.orders)
+
+    def list_fills_since(self, min_ts: int) -> list[dict]:
+        if self.error:
+            raise self.error
+        if self.fail_fills:
+            raise RuntimeError("fills endpoint failed")
+        self.fill_min_ts = min_ts
+        return list(self.fills)
+
+    def list_settlements_since(self, min_ts: int) -> list[dict]:
+        if self.error:
+            raise self.error
+        if self.fail_settlements:
+            raise RuntimeError("settlements endpoint failed")
+        self.settlement_min_ts = min_ts
+        return list(self.settlements)
 
     def cancel_order(self, order_id: str, market_ticker: str) -> httpx.Response:
         self.cancelled.append((order_id, market_ticker))
@@ -129,6 +155,63 @@ def _resting_order(
         "maker_fill_cost_dollars": "0",
         "user_id": "u",
         "type": "limit",
+    }
+
+
+def _fill(
+    ticker: str = "KXBTC15M-T",
+    *,
+    fill_id: str = "fill-1",
+    outcome: str = "yes",
+    count: str = "20.00",
+    yes_px: str = "0.5000",
+    no_px: str = "0.5000",
+    fee: str = "0.2500",
+    created: str = "2026-09-14T12:00:00Z",
+    is_taker: bool = False,
+) -> dict:
+    return {
+        "fill_id": fill_id,
+        "trade_id": fill_id,
+        "order_id": f"ord-{fill_id}",
+        "ticker": ticker,
+        "market_ticker": ticker,
+        "outcome_side": outcome,
+        "book_side": "bid" if outcome == "yes" else "ask",
+        "count_fp": count,
+        "yes_price_dollars": yes_px,
+        "no_price_dollars": no_px,
+        "is_taker": is_taker,
+        "fee_cost": fee,
+        "created_time": created,
+        "exchange_index": 0,
+    }
+
+
+def _settlement(
+    ticker: str = "KXBTC15M-SETTLED",
+    *,
+    result: str = "no",
+    yes_count: str = "20.00",
+    yes_cost: str = "10.0000",
+    no_count: str = "0.00",
+    no_cost: str = "0.0000",
+    revenue_cents: int = 0,
+    fee: str = "0.0000",
+    settled_time: str = "2026-09-14T12:05:00Z",
+) -> dict:
+    return {
+        "ticker": ticker,
+        "event_ticker": ticker,
+        "exchange_index": 0,
+        "market_result": result,
+        "yes_count_fp": yes_count,
+        "yes_total_cost_dollars": yes_cost,
+        "no_count_fp": no_count,
+        "no_total_cost_dollars": no_cost,
+        "revenue": revenue_cents,
+        "fee_cost": fee,
+        "settled_time": settled_time,
     }
 
 
@@ -477,6 +560,55 @@ def test_list_resting_orders_missing_key_is_partial() -> None:
         client.close()
 
 
+def test_list_fills_paginates_and_missing_key_fails() -> None:
+    hits = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hits["n"] += 1
+        assert request.url.path.endswith("/portfolio/fills")
+        assert request.url.params.get("min_ts") == "1000"
+        if hits["n"] == 1:
+            return httpx.Response(
+                200,
+                json={"fills": [_fill(fill_id="a")], "cursor": "page-2"},
+            )
+        return httpx.Response(200, json={"fills": [_fill(fill_id="b")], "cursor": None})
+
+    client = _client(handler)
+    client._headers = lambda method, url, authenticated: {"Accept": "application/json"}  # type: ignore[method-assign]
+    try:
+        rows = client.list_fills_since(1000)
+    finally:
+        client.close()
+    assert [row["fill_id"] for row in rows] == ["a", "b"]
+
+    def missing(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, json={"cursor": None})
+
+    client = _client(missing)
+    client._headers = lambda method, url, authenticated: {"Accept": "application/json"}  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError, match="missing fills"):
+            client.list_fills_since(1000)
+    finally:
+        client.close()
+
+
+def test_list_settlements_missing_key_fails() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, json={"cursor": None})
+
+    client = _client(handler)
+    client._headers = lambda method, url, authenticated: {"Accept": "application/json"}  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError, match="missing settlements"):
+            client.list_settlements_since(1000)
+    finally:
+        client.close()
+
+
 def test_pagination_overflow_fail_closed() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         del request
@@ -496,26 +628,106 @@ def test_pagination_overflow_fail_closed() -> None:
     assert PAGINATE_MAX_PAGES == 50
 
 
-def test_exchange_snapshot_rebuilds_daily_pnl_inputs() -> None:
+def test_exchange_snapshot_rebuilds_daily_pnl_from_blotter() -> None:
     settings = _settings()
+    now = datetime(2026, 9, 14, 12, 30, tzinfo=UTC)
+    rest = FakeRest(
+        [_yes_position(qty="20.00", exposure="10.0000", realized="-4.0000", fees="0.5000")],
+        [],
+        fills=[_fill(fee="0.2500", created="2026-09-14T12:00:00Z")],
+        settlements=[
+            _settlement(
+                yes_count="20.00",
+                yes_cost="10.0000",
+                revenue_cents=0,
+                fee="0.4000",
+            )
+        ],
+    )
+    rec = _reconciler(settings, rest)
+    rec.attempt(now)
+    snap = rec.portfolio.snapshot()
+    assert rec.state.source == SOURCE_EXCHANGE_SYNC
+    # Open-position realized_pnl is ignored; daily kill uses fills + settlements.
+    assert rec.state.blotter_fills == 1
+    assert rec.state.settlements_applied == 1
+    assert snap.realized_pnl == Decimal("-10.0000")  # 0 revenue - $10 cost
+    # Fill fee on the open ticker + settlement fee on the settled ticker (no fills there).
+    assert snap.fees == Decimal("0.6500")
+    assert snap.unrealized_pnl == Decimal("0")
+    assert snap.daily_pnl == Decimal("-10.6500")
+    assert snap.open_notional == Decimal("10.0000")
+    assert snap.unpaired_notional == Decimal("10.0000")
+    assert "KXBTC15M-T" in snap.window_ids
+    assert rec.portfolio.kill_active is False
+    assert rest.fill_min_ts == int(datetime(2026, 9, 14, tzinfo=UTC).timestamp())
+
+
+def test_settled_same_day_loss_trips_daily_kill_on_restart() -> None:
+    settings = _settings()
+    now = datetime(2026, 9, 14, 12, 30, tzinfo=UTC)
     rec = _reconciler(
         settings,
         FakeRest(
-            [_yes_position(qty="20.00", exposure="10.0000", realized="-4.0000", fees="0.5000")],
             [],
+            [],
+            fills=[],
+            settlements=[
+                _settlement(
+                    yes_count="20.00",
+                    yes_cost="10.0000",
+                    revenue_cents=0,
+                    fee="0.5000",
+                )
+            ],
         ),
     )
-    rec.attempt()
-    snap = rec.portfolio.snapshot()
+    rec.attempt(now)
     assert rec.state.source == SOURCE_EXCHANGE_SYNC
-    assert snap.realized_pnl == Decimal("-4.0000")
-    assert snap.fees == Decimal("0.5000")
-    assert snap.unrealized_pnl == Decimal("0")
-    assert snap.daily_pnl == Decimal("-4.5000")
-    assert snap.open_notional == Decimal("10.0000")
-    assert snap.unpaired_notional == Decimal("10.0000")
-    assert snap.window_ids == frozenset({"KXBTC15M-T"})
-    assert rec.portfolio.kill_active is False
+    snap = rec.portfolio.snapshot()
+    assert snap.realized_pnl == Decimal("-10.0000")
+    assert snap.fees == Decimal("0.5000")  # no fills; settlement fee included
+    assert snap.daily_pnl == Decimal("-10.5000")
+    engine = RiskEngine(settings)
+    assert engine.maybe_trip_limits(snap) is True
+    assert classify_kill(engine.kill_reason) == "loss"
+
+
+def test_bad_price_resting_fail_closed() -> None:
+    settings = _settings()
+    bad = _resting_order()
+    bad["yes_price_dollars"] = "0"
+    bad["no_price_dollars"] = "0"
+    rec = _reconciler(settings, FakeRest([], [bad]))
+    state = rec.attempt()
+    assert state.ready_to_trade is False
+    assert state.status == STATUS_NOT_READY
+    hud = state.as_hud(cancel_orphans=False)
+    assert hud["hard_hold"] is True
+    assert hud["book_verified"] is False
+    assert rec.portfolio.ready_to_trade is False
+    assert rec.portfolio.resting == {}
+    assert "unparseable resting price" in state.error
+
+
+def test_fills_endpoint_failure_fail_closed() -> None:
+    settings = _settings()
+    rec = _reconciler(settings, FakeRest([_yes_position()], [], fail_fills=True))
+    state = rec.attempt()
+    assert state.status == STATUS_NOT_READY
+    assert rec.portfolio.ready_to_trade is False
+    assert "fills" in state.error.lower()
+
+
+def test_unparseable_fill_fail_closed() -> None:
+    settings = _settings()
+    bad = _fill()
+    bad["yes_price_dollars"] = "0"
+    bad["no_price_dollars"] = "0"
+    rec = _reconciler(settings, FakeRest([], [], fills=[bad]))
+    state = rec.attempt(datetime(2026, 9, 14, 12, 30, tzinfo=UTC))
+    assert state.status == STATUS_NOT_READY
+    assert "unparseable fill price" in state.error
 
 
 def test_rebuilt_state_still_enforces_option_b_caps() -> None:

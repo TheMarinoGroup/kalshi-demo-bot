@@ -6,8 +6,10 @@ quotes, and session PnL do not. For demo-submit / live, Kalshi is the
 source of truth — the bot must rebuild risk from GET /portfolio/positions
 and GET /portfolio/orders before quoting.
 
-Fail-closed: ready_to_trade stays false on auth, network, or partial
-snapshot errors. Retry with backoff. Never quote blind.
+Fail-closed: ready_to_trade stays false on auth, network, partial
+snapshot errors, or unparseable resting/fill/settlement rows. Retry with
+backoff. Never quote blind. Daily kill on EXCHANGE SYNC uses today's
+fills blotter plus settlements, not only open-position realized_pnl.
 """
 
 from __future__ import annotations
@@ -52,13 +54,21 @@ PAGINATE_MAX_PAGES = 50
 class PortfolioRest(Protocol):
     def list_market_positions(self) -> list[dict[str, Any]]: ...
     def list_resting_orders(self) -> list[dict[str, Any]]: ...
+    def list_fills_since(self, min_ts: int) -> list[dict[str, Any]]: ...
+    def list_settlements_since(self, min_ts: int) -> list[dict[str, Any]]: ...
     def cancel_order(self, order_id: str, market_ticker: str) -> Any: ...
+
+
+class ReconcileParseError(RuntimeError):
+    """Unparseable exchange row. Fail closed — do not READY with an undercount."""
 
 
 @dataclass
 class ExchangeSnapshot:
     positions: list[dict[str, Any]]
     orders: list[dict[str, Any]]
+    fills: list[dict[str, Any]] = field(default_factory=list)
+    settlements: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -76,6 +86,8 @@ class ReconcileState:
     cancelled_orphans: int = 0
     paper_fills_restored: int = 0
     paper_quotes_restored: int = 0
+    blotter_fills: int = 0
+    settlements_applied: int = 0
 
     def as_hud(self, *, cancel_orphans: bool) -> dict[str, Any]:
         return {
@@ -91,6 +103,8 @@ class ReconcileState:
             "cancel_orphans": cancel_orphans,
             "paper_fills_restored": self.paper_fills_restored,
             "paper_quotes_restored": self.paper_quotes_restored,
+            "blotter_fills": self.blotter_fills,
+            "settlements_applied": self.settlements_applied,
             "next_retry_ts": self.next_retry_ts.isoformat() if self.next_retry_ts else None,
             "hard_hold": (not self.ready_to_trade) and self.status == STATUS_NOT_READY,
             "book_verified": self.ready_to_trade,
@@ -104,6 +118,11 @@ class TapeRestore:
     settlements: int = 0
     records: int = 0
     owned_ids: set[str] = field(default_factory=set)
+
+
+def utc_day_start(now: datetime) -> datetime:
+    aware = now if now.tzinfo else now.replace(tzinfo=UTC)
+    return datetime(aware.year, aware.month, aware.day, tzinfo=UTC)
 
 
 def retry_delay_seconds(attempts: int) -> float:
@@ -155,7 +174,7 @@ def _record_date(record: dict[str, Any]) -> date | None:
     return parsed.date() if parsed else None
 
 
-def outcome_from_order(raw: dict[str, Any]) -> Outcome:
+def outcome_from_order(raw: dict[str, Any]) -> Outcome | None:
     side = str(raw.get("outcome_side") or "").lower()
     if side == "yes":
         return Outcome.YES
@@ -173,10 +192,10 @@ def outcome_from_order(raw: dict[str, Any]) -> Outcome:
         return Outcome.NO
     log.warning(
         "reconcile_order_outcome_unknown",
-        order_id=raw.get("order_id"),
+        order_id=raw.get("order_id") or raw.get("fill_id"),
         body=str(raw)[:200],
     )
-    return Outcome.YES
+    return None
 
 
 def price_from_order(raw: dict[str, Any], outcome: Outcome) -> Decimal | None:
@@ -250,16 +269,21 @@ def resting_from_api(
     if remaining <= 0:
         return None
     ticker = str(raw.get("ticker") or "")
+    order_id = str(raw.get("order_id") or raw.get("client_order_id") or "")
     if not ticker:
-        return None
+        raise ReconcileParseError(f"resting order missing ticker order_id={order_id or '?'}")
     outcome = outcome_from_order(raw)
+    if outcome is None:
+        raise ReconcileParseError(
+            f"unparseable resting outcome order_id={order_id} ticker={ticker}"
+        )
     price = price_from_order(raw, outcome)
     if price is None or price <= 0 or price >= 1:
-        log.warning("reconcile_skip_order_bad_price", order_id=raw.get("order_id"), ticker=ticker)
-        return None
-    order_id = str(raw.get("order_id") or raw.get("client_order_id") or "")
+        raise ReconcileParseError(
+            f"unparseable resting price order_id={order_id} ticker={ticker}"
+        )
     if not order_id:
-        return None
+        raise ReconcileParseError(f"resting order missing order_id ticker={ticker}")
     return RestingOrder(
         order_id=order_id,
         client_order_id=str(raw.get("client_order_id") or order_id),
@@ -269,6 +293,109 @@ def resting_from_api(
         price=price,
         remaining=remaining,
         post_only=bool(raw.get("post_only", True)),
+    )
+
+
+def fill_from_api(
+    raw: dict[str, Any],
+    *,
+    event_lookup: dict[str, str],
+    day: date,
+) -> Fill | None:
+    """Parse an exchange fill. Wrong-day rows are skipped; bad rows fail closed."""
+    ts = _parse_ts(raw.get("created_time"))
+    if ts is None and raw.get("ts") not in (None, ""):
+        try:
+            ts = datetime.fromtimestamp(int(raw["ts"]), tz=UTC)
+        except (TypeError, ValueError, OSError):
+            ts = None
+    if ts is not None and ts.date() != day:
+        return None
+    fill_id = str(raw.get("fill_id") or raw.get("trade_id") or "")
+    ticker = str(raw.get("ticker") or raw.get("market_ticker") or "")
+    if not fill_id or not ticker:
+        raise ReconcileParseError("fill missing fill_id or ticker")
+    outcome = outcome_from_order(raw)
+    if outcome is None:
+        raise ReconcileParseError(f"unparseable fill outcome fill_id={fill_id}")
+    price = price_from_order(raw, outcome)
+    if price is None or price <= 0 or price >= 1:
+        raise ReconcileParseError(f"unparseable fill price fill_id={fill_id} ticker={ticker}")
+    count_raw = raw.get("count_fp")
+    if count_raw in (None, ""):
+        count_raw = raw.get("count") or 0
+    count = D(count_raw)
+    if count <= 0:
+        raise ReconcileParseError(f"unparseable fill count fill_id={fill_id} ticker={ticker}")
+    fee = D(raw.get("fee_cost") or raw.get("fee_dollars") or 0)
+    ts_ms = int(ts.timestamp() * 1000) if ts else 0
+    return Fill(
+        fill_id=fill_id,
+        order_id=str(raw.get("order_id") or ""),
+        market_ticker=ticker,
+        event_ticker=str(raw.get("event_ticker") or event_lookup.get(ticker) or ticker),
+        outcome=outcome,
+        price=price,
+        count=count,
+        fee=fee,
+        is_taker=bool(raw.get("is_taker")),
+        ts_ms=ts_ms,
+    )
+
+
+def settlement_realized_from_api(raw: dict[str, Any]) -> tuple[str, Decimal]:
+    """Return (ticker, realized PnL dollars) for a settlement row. Fees stay on fills."""
+    ticker = str(raw.get("ticker") or "")
+    if not ticker:
+        raise ReconcileParseError("settlement missing ticker")
+    result = str(raw.get("market_result") or "").lower()
+    if result not in {"yes", "no", "scalar"}:
+        raise ReconcileParseError(f"unparseable settlement result ticker={ticker}")
+    yes_cost = D(raw.get("yes_total_cost_dollars") or 0)
+    no_cost = D(raw.get("no_total_cost_dollars") or 0)
+    if raw.get("revenue_dollars") not in (None, ""):
+        revenue = D(raw["revenue_dollars"])
+    elif raw.get("revenue") not in (None, ""):
+        revenue = D(raw["revenue"]) / Decimal("100")
+    else:
+        raise ReconcileParseError(f"settlement missing revenue ticker={ticker}")
+    return ticker, revenue - yes_cost - no_cost
+
+
+def daily_blotter_from_exchange(
+    settings: Settings,
+    fills: list[Fill],
+    settlements: list[dict[str, Any]],
+) -> tuple[Decimal, Decimal, list[Fill], Decimal, Decimal]:
+    """Today's realized + fees from fills (pairing) and settlements (directional).
+
+    Returns (realized, fees, fills, locked_pair_realized, directional_settled).
+    """
+    settled: dict[str, Decimal] = {}
+    for raw in settlements:
+        ticker, pnl = settlement_realized_from_api(raw)
+        settled[ticker] = settled.get(ticker, Decimal("0")) + pnl
+    scratch = Portfolio(settings)
+    for fill in fills:
+        scratch.apply_fill(fill, enforce_open_cap=False)
+    pairing = Decimal("0")
+    for ticker, pos in scratch.positions.items():
+        if ticker in settled:
+            continue
+        pairing += pos.realized_pnl
+    directional = sum(settled.values(), Decimal("0"))
+    fill_tickers = {fill.market_ticker for fill in fills}
+    extra_fees = Decimal("0")
+    for raw in settlements:
+        ticker = str(raw.get("ticker") or "")
+        if ticker and ticker not in fill_tickers:
+            extra_fees += D(raw.get("fee_cost") or 0)
+    return (
+        pairing + directional,
+        scratch.fees + extra_fees,
+        list(scratch.fills),
+        pairing,
+        directional,
     )
 
 
@@ -458,7 +585,7 @@ class Reconciler:
             has_rest=self.rest is not None,
         )
         try:
-            snapshot, skipped = self._fetch_snapshot()
+            snapshot, skipped = self._fetch_snapshot(now)
         except Exception as exc:
             return self._fail(now, f"{type(exc).__name__}: {exc}")
 
@@ -475,6 +602,15 @@ class Reconciler:
                 for raw in snapshot.orders
                 if (order := resting_from_api(raw, event_lookup=event_lookup)) is not None
             ]
+            parsed_fills = [
+                fill
+                for raw in snapshot.fills
+                if (fill := fill_from_api(raw, event_lookup=event_lookup, day=now.date()))
+                is not None
+            ]
+            blotter = daily_blotter_from_exchange(
+                self.settings, parsed_fills, snapshot.settlements
+            )
         except Exception as exc:
             return self._fail(now, f"parse {type(exc).__name__}: {exc}")
 
@@ -497,7 +633,9 @@ class Reconciler:
         if orphans and may_cancel_orphans(self.settings):
             cancelled, parsed_orders = self._cancel_orphans(orphans, parsed_orders)
 
-        exchange_occupied = bool(parsed_positions or parsed_orders)
+        exchange_occupied = bool(
+            parsed_positions or parsed_orders or parsed_fills or snapshot.settlements
+        )
         tape_restore = TapeRestore()
         # Startup is an empty book. Do not wipe in-process fills/PnL that tests
         # (or a same-process HUD) already applied before the first step().
@@ -508,6 +646,8 @@ class Reconciler:
             or self.portfolio.realized_pnl
             or self.portfolio.fees
         )
+        blotter_fills = 0
+        settlements_applied = 0
         if skipped or not exchange_occupied:
             if self.settings.paper_tape or self.mock:
                 if not already:
@@ -526,16 +666,22 @@ class Reconciler:
                     )
                 source = SOURCE_PAPER_LOCAL
             else:
-                self.portfolio.replace_exchange_inventory(parsed_positions, parsed_orders)
+                self._apply_exchange_sync(parsed_positions, parsed_orders, blotter)
+                blotter_fills = len(parsed_fills)
+                settlements_applied = len(snapshot.settlements)
                 source = SOURCE_EXCHANGE_SYNC
         else:
-            self.portfolio.replace_exchange_inventory(parsed_positions, parsed_orders)
+            self._apply_exchange_sync(parsed_positions, parsed_orders, blotter)
+            blotter_fills = len(parsed_fills)
+            settlements_applied = len(snapshot.settlements)
             source = SOURCE_EXCHANGE_SYNC
             if self.settings.paper_tape:
                 log.info(
                     "reconcile_tape_skipped_exchange_occupied",
                     positions=len(parsed_positions),
                     resting=len(parsed_orders),
+                    fills=len(parsed_fills),
+                    settlements=len(snapshot.settlements),
                 )
 
         self._mark_ready(
@@ -546,10 +692,28 @@ class Reconciler:
             orphans=len(orphans),
             cancelled=cancelled,
             tape_restore=tape_restore,
+            blotter_fills=blotter_fills,
+            settlements_applied=settlements_applied,
         )
         return self.state
 
-    def _fetch_snapshot(self) -> tuple[ExchangeSnapshot, bool]:
+    def _apply_exchange_sync(
+        self,
+        positions: list[Position],
+        orders: list[RestingOrder],
+        blotter: tuple[Decimal, Decimal, list[Fill], Decimal, Decimal],
+    ) -> None:
+        realized, fees, fills, locked, directional = blotter
+        self.portfolio.replace_exchange_inventory(positions, orders)
+        self.portfolio.apply_daily_blotter(
+            realized_pnl=realized,
+            fees=fees,
+            fills=fills,
+            locked_pair_realized=locked,
+            directional_settled=directional,
+        )
+
+    def _fetch_snapshot(self, now: datetime) -> tuple[ExchangeSnapshot, bool]:
         """Return (snapshot, skipped). skipped=True means no exchange read was required."""
         if self.mock:
             return ExchangeSnapshot(positions=[], orders=[]), True
@@ -557,11 +721,24 @@ class Reconciler:
             if self.settings.live_submit:
                 raise RuntimeError("demo-submit reconcile needs an authenticated REST client")
             return ExchangeSnapshot(positions=[], orders=[]), True
+        min_ts = int(utc_day_start(now).timestamp())
         positions = self.rest.list_market_positions()
         orders = self.rest.list_resting_orders()
-        if positions is None or orders is None:
-            raise RuntimeError("partial exchange snapshot (positions or orders missing)")
-        return ExchangeSnapshot(positions=list(positions), orders=list(orders)), False
+        fills = self.rest.list_fills_since(min_ts)
+        settlements = self.rest.list_settlements_since(min_ts)
+        if positions is None or orders is None or fills is None or settlements is None:
+            raise RuntimeError(
+                "partial exchange snapshot (positions, orders, fills, or settlements missing)"
+            )
+        return (
+            ExchangeSnapshot(
+                positions=list(positions),
+                orders=list(orders),
+                fills=list(fills),
+                settlements=list(settlements),
+            ),
+            False,
+        )
 
     def _cancel_orphans(
         self,
@@ -602,6 +779,8 @@ class Reconciler:
         orphans: int,
         cancelled: int,
         tape_restore: TapeRestore,
+        blotter_fills: int = 0,
+        settlements_applied: int = 0,
     ) -> None:
         self.state.ready_to_trade = True
         self.state.status = STATUS_READY
@@ -615,6 +794,8 @@ class Reconciler:
         self.state.cancelled_orphans = cancelled
         self.state.paper_fills_restored = tape_restore.fills
         self.state.paper_quotes_restored = tape_restore.resting
+        self.state.blotter_fills = blotter_fills
+        self.state.settlements_applied = settlements_applied
         self.portfolio.ready_to_trade = True
         if self.execution is not None:
             self.execution.ready_to_trade = True
@@ -629,6 +810,8 @@ class Reconciler:
                 cancelled_orphans=cancelled,
                 paper_fills=tape_restore.fills,
                 paper_quotes=tape_restore.resting,
+                blotter_fills=blotter_fills,
+                settlements=settlements_applied,
             )
         log.info(
             "reconcile_ok",
@@ -639,6 +822,8 @@ class Reconciler:
             cancelled_orphans=cancelled,
             paper_fills=tape_restore.fills,
             paper_quotes=tape_restore.resting,
+            blotter_fills=blotter_fills,
+            settlements=settlements_applied,
         )
 
     def _fail(self, now: datetime, error: str) -> ReconcileState:

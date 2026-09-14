@@ -325,6 +325,8 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
             "cancel_orphans": bool(getattr(settings, "cancel_orphans", False)),
             "paper_fills_restored": 0,
             "paper_quotes_restored": 0,
+            "blotter_fills": 0,
+            "settlements_applied": 0,
             "next_retry_ts": None,
             "hard_hold": False,
             "book_verified": ready_fallback,

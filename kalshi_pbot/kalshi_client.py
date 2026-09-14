@@ -409,6 +409,22 @@ class KalshiRestClient:
             params={"limit": 200, "status": "resting"},
         )
 
+    def list_fills_since(self, min_ts: int) -> list[JsonDict]:
+        """Today's fills via GET /portfolio/fills?min_ts=… (paginated)."""
+        return self._paginate_list(
+            "/portfolio/fills",
+            list_key="fills",
+            params={"limit": 200, "min_ts": min_ts},
+        )
+
+    def list_settlements_since(self, min_ts: int) -> list[JsonDict]:
+        """Today's settlements via GET /portfolio/settlements?min_ts=… (paginated)."""
+        return self._paginate_list(
+            "/portfolio/settlements",
+            list_key="settlements",
+            params={"limit": 200, "min_ts": min_ts},
+        )
+
     def create_order(self, body: JsonDict) -> httpx.Response:
         if self.settings.paper_tape or self.settings.dry_run:
             raise RuntimeError(
