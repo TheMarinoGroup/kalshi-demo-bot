@@ -732,8 +732,8 @@ class MockKalshiClient:
         self._books: dict[str, JsonDict] = {
             m.ticker: {
                 "orderbook_fp": {
-                    "yes_dollars": [["0.4700", "80.00"], ["0.4800", "40.00"]],
-                    "no_dollars": [["0.4700", "70.00"], ["0.4900", "25.00"]],
+                    "yes_dollars": [["0.4600", "80.00"], ["0.4700", "40.00"]],
+                    "no_dollars": [["0.4600", "70.00"], ["0.4800", "25.00"]],
                 }
             }
             for m in self._markets.values()

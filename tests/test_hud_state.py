@@ -80,9 +80,9 @@ def test_snapshot_must_show_panels_from_mock_bot() -> None:
     win = live[0]
     assert win["ttc_zone"] in {"GREEN", "AMBER", "RED"}
     assert win["floor_strike"] == 65000
-    assert win["bid_sum"] == 0.97  # 0.48 + 0.49
-    assert win["ask_sum"] == 1.03
-    assert win["underround"] is False  # 0.97 > 1 − 0.04 paper-v2 min_edge
+    assert win["bid_sum"] == 0.95  # 0.47 + 0.48 mock underround book
+    assert win["ask_sum"] == 1.05
+    assert win["underround"] is True  # 0.95 ≤ 1 − 0.04 paper-v2 min_edge
     assert win["arb_taker_eligible"] is False
     assert win["arb"] is False  # must not flash green ARB for underround
     assert win["yes_bid_sz"] == 40
@@ -309,6 +309,9 @@ def test_book_depth_splits_underround_from_taker_arb() -> None:
     assert under["arb"] is False
     assert under["ask_sum"] == 1.03
     assert under["ask_sum_plus_fees"] > under["ask_sum"]
+    paper = _book_depth(book("0.4800", "0.4900"), Decimal("0.04"))
+    assert paper["underround"] is False
+    assert paper["bid_sum"] == 0.97
 
     # Crossed book: bid_sum 1.40, ask_sum 0.60 + taker fees still < 1.
     regime_a = _book_depth(book("0.7000", "0.7000"), Decimal("0.02"))

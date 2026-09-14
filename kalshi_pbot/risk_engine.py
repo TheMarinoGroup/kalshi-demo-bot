@@ -18,6 +18,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from kalshi_pbot.config import CLIP_MAX, CLIP_MIN, Settings
+from kalshi_pbot.kelly import kelly_fraction, over_kelly_max
 from kalshi_pbot.types import (
     IntentKind,
     PortfolioSnapshot,
@@ -323,6 +324,16 @@ class RiskEngine:
 
         if intent.count <= 0 or intent.price <= 0 or intent.price >= 1:
             return RiskDecision(False, RejectReason.INVALID, "price/count out of range")
+
+        if not flatten_like and over_kelly_max(
+            intent.notional, self.settings.bankroll, self.settings.kelly_max
+        ):
+            frac = kelly_fraction(intent.notional, self.settings.bankroll)
+            return RiskDecision(
+                False,
+                RejectReason.KELLY_CAP,
+                f"kelly {frac} > max {self.settings.kelly_max}",
+            )
 
         if in_last_seconds(close_time, self.settings.last_seconds, now):
             if flatten_like:
