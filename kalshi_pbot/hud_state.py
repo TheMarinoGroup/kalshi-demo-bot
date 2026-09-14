@@ -307,6 +307,31 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
         if (book := bot.books.get(m.ticker)) is not None
     }
     port = bot.portfolio.snapshot(books)
+    recon = getattr(bot, "reconcile", None)
+    if recon is not None:
+        reconcile = recon.state.as_hud(cancel_orphans=settings.cancel_orphans)
+    else:
+        ready_fallback = bool(getattr(bot.portfolio, "ready_to_trade", True))
+        reconcile = {
+            "ready_to_trade": ready_fallback,
+            "status": "READY" if ready_fallback else "SYNCING",
+            "source": "",
+            "error": "",
+            "attempts": 0,
+            "position_count": 0,
+            "resting_count": 0,
+            "orphan_count": 0,
+            "cancelled_orphans": 0,
+            "cancel_orphans": bool(getattr(settings, "cancel_orphans", False)),
+            "paper_fills_restored": 0,
+            "paper_quotes_restored": 0,
+            "blotter_fills": 0,
+            "settlements_applied": 0,
+            "next_retry_ts": None,
+            "hard_hold": False,
+            "book_verified": ready_fallback,
+        }
+    ready = bool(reconcile.get("ready_to_trade"))
     metrics = compute_metrics(settings, bot.portfolio, port)
     kill_reason = port.kill_reason or bot.risk.kill_reason
     kill_active = bool(port.kill_active or bot.risk.kill_active)
@@ -336,7 +361,7 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
         to_close = seconds_to_close(market.close_time, now)
         last_60 = in_last_seconds(market.close_time, settings.last_seconds, now)
         live = market.ticker in bot.universe.markets
-        new_risk = (not kill_active) and (not last_60) and live
+        new_risk = ready and (not kill_active) and (not last_60) and live
         # Violation: last-60s with a still-resting entry (post-only) quote.
         violation = bool(
             live
@@ -381,6 +406,10 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
                 "last_60s": last_60,
                 "last60s_lock": last_60,
                 "new_risk_allowed": new_risk,
+                "reconcile_ready": ready,
+                "reconcile_status": reconcile.get("status"),
+                "hard_hold": bool(reconcile.get("hard_hold")),
+                "book_verified": bool(reconcile.get("book_verified", ready)),
                 "gate_violation": violation,
                 "live": live,
                 "yes_bid": _f(tob.yes_bid) if tob else None,
@@ -418,7 +447,7 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
                 }
             )
 
-    new_risk_allowed = (not kill_active) and (not any_last_60)
+    new_risk_allowed = ready and (not kill_active) and (not any_last_60)
 
     settle_rows = []
     for market in bot.universe.settling.values():
@@ -539,6 +568,7 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
         "v": 3,
         "ts": _iso(now),
         "mode": _mode_block(settings),
+        "reconcile": reconcile,
         "kill": {
             "active": kill_active,
             "state": "TRIPPED" if kill_active else "ARMED",
@@ -585,8 +615,11 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
         "gate": {
             "last_seconds": settings.last_seconds,
             "last60s_lock": any_last_60,
-            "no_new_risk": any_last_60 or kill_active,
+            "no_new_risk": any_last_60 or kill_active or (not ready),
             "new_risk_allowed": new_risk_allowed,
+            "ready_to_trade": ready,
+            "hard_hold": bool(reconcile.get("hard_hold")),
+            "book_verified": bool(reconcile.get("book_verified", ready)),
             "violation": any_violation,
             "windows": gate_rows,
         },

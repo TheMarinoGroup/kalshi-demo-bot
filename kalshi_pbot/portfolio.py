@@ -43,6 +43,8 @@ class Portfolio:
         self.taker_fill_count = 0
         self.maker_fill_notional = Decimal("0")
         self.taker_fill_notional = Decimal("0")
+        # Startup reconcile gate. False until PaperBot marks an exchange/local snapshot ok.
+        self.ready_to_trade = True
 
     def reset_day_if_needed(self, now: datetime | None = None) -> None:
         today = (now or datetime.now(UTC)).date()
@@ -89,6 +91,78 @@ class Portfolio:
 
     def resting_for(self, ticker: str) -> list[RestingOrder]:
         return [o for o in self.resting.values() if o.market_ticker == ticker]
+
+    def clear_inventory(self) -> None:
+        """Drop positions, resting, and session fills. Used before a tape rebuild."""
+        self.positions.clear()
+        self.resting.clear()
+        self.fills.clear()
+        self.realized_pnl = Decimal("0")
+        self.fees = Decimal("0")
+        self.locked_pair_realized = Decimal("0")
+        self.directional_settled = Decimal("0")
+        self.paired_qty_realized = Decimal("0")
+        self.directional_qty_settled = Decimal("0")
+        self.maker_fees = Decimal("0")
+        self.taker_fees = Decimal("0")
+        self.maker_fill_count = 0
+        self.taker_fill_count = 0
+        self.maker_fill_notional = Decimal("0")
+        self.taker_fill_notional = Decimal("0")
+
+    def replace_exchange_inventory(
+        self,
+        positions: list[Position],
+        resting: list[RestingOrder],
+    ) -> None:
+        """Replace in-memory book with an exchange snapshot. Does not enforce caps.
+
+        Inventory (open / onesided / windows) comes from positions + resting.
+        Daily PnL inputs are applied separately from today's fills/settlements
+        blotter so settled same-day loss is not dropped. Does **not** touch
+        kill flags or the persisted kill latch.
+        """
+        self.positions = {
+            pos.market_ticker: pos
+            for pos in positions
+            if pos.yes_qty > 0 or pos.no_qty > 0
+        }
+        self.resting = {}
+        for order in resting:
+            self.upsert_resting(order, enforce_open_cap=False)
+        # Daily kill inputs are not lifetime position realized_pnl.
+        self.realized_pnl = Decimal("0")
+        self.fees = Decimal("0")
+        self.fills.clear()
+        self.locked_pair_realized = Decimal("0")
+        self.directional_settled = Decimal("0")
+        self.paired_qty_realized = Decimal("0")
+        self.directional_qty_settled = Decimal("0")
+        self.maker_fees = Decimal("0")
+        self.taker_fees = Decimal("0")
+        self.maker_fill_count = 0
+        self.taker_fill_count = 0
+        self.maker_fill_notional = Decimal("0")
+        self.taker_fill_notional = Decimal("0")
+
+    def apply_daily_blotter(
+        self,
+        *,
+        realized_pnl: Decimal,
+        fees: Decimal,
+        fills: list[Fill] | None = None,
+        locked_pair_realized: Decimal | None = None,
+        directional_settled: Decimal | None = None,
+    ) -> None:
+        """Install today's realized/fees from fills + settlements. Not inventory."""
+        self.realized_pnl = realized_pnl
+        self.fees = fees
+        if fills is not None:
+            self.fills = list(fills)
+        if locked_pair_realized is not None:
+            self.locked_pair_realized = locked_pair_realized
+        if directional_settled is not None:
+            self.directional_settled = directional_settled
 
     def apply_fill(self, fill: Fill, *, enforce_open_cap: bool = True) -> bool:
         """Apply a paper/demo fill. Refuses before mutation if open would exceed max_open."""
@@ -317,4 +391,5 @@ class Portfolio:
             resting=tuple(self.resting.values()),
             kill_active=self.kill_active,
             kill_reason=self.kill_reason,
+            ready_to_trade=self.ready_to_trade,
         )

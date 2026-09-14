@@ -192,6 +192,7 @@ CLI (kalshi-pbot) ── runner.PaperBot
                        ├── RiskEngine
                        ├── PaperMatcher + JsonlTape + expectancy.replay_tape
                        ├── ExecutionEngine   (paper-tape default; POST gated)
+                       ├── Reconciler        (startup exchange snapshot; ready_to_trade gate)
                        └── Portfolio + metrics
 ```
 
@@ -209,6 +210,7 @@ CLI (kalshi-pbot) ── runner.PaperBot
 | `kalshi_pbot/fees.py` | Quadratic taker / maker fee + `fee_drag` |
 | `kalshi_pbot/risk_engine.py` | Hard gates (last-60s, daily kill, caps) + soft unpaired-exists reject |
 | `kalshi_pbot/execution.py` | Paper register or `POST /portfolio/events/orders` |
+| `kalshi_pbot/reconcile.py` | Startup GET positions + orders; fail-closed ready gate |
 | `kalshi_pbot/portfolio.py` | Fills, paired PnL, one-sided notional, post-close recycle |
 | `kalshi_pbot/runner.py` | Discover → decide → risk → match / execute |
 | `kalshi_pbot/cli.py` | `run`, `hud`, `discover`, `status`, `replay`, `flatten` |
@@ -313,6 +315,26 @@ On Windows, `start-hud.bat` cds to the repo, opens the desk in a browser after ~
 
 `watch-hud.bat` is process survival only: every 15s it hits `/api/health` on `:8080`, and if the desk is not healthy it restarts `python -m kalshi_pbot hud`, appending each restart to `data/hud-watchdog.log`. It does **not** change Risk Desk caps. It does **not** auto-clear the kill latch — daily-loss / manual kills persist in `data/kill-latch.json` and are restored on startup.
 
+## Restart safety / reconcile
+
+A process restart (watchdog, crash, `Ctrl+C`) does **not** reconstruct in-memory paper state by itself. What survives on disk today:
+
+* `data/windows.json` — discovered 15m windows
+* `data/tape.jsonl` — append-only research tape
+* `data/kill-latch.json` — same-day daily-loss / manual kill only
+
+What used to live only in RAM (and still does, until reconcile runs): paper positions, unpaired inventory, resting quotes, session PnL. **Before this feature, a paper restart lost that book.** After this feature:
+
+1. `ready_to_trade=false` until reconcile completes. The HUD shows **SYNCING** vs **READY**. A failed fetch is **NOT READY · HARD HOLD** (never a silent empty book). Flatten/cancel of known inventory is allowed; **all new risk is refused**.
+2. With credentials, the bot fetches **GET `/portfolio/positions`**, **GET `/portfolio/orders?status=resting`**, **GET `/portfolio/fills?min_ts=today`**, and **GET `/portfolio/settlements?min_ts=today`** before any new quotes and rebuilds `PortfolioSnapshot` (open, onesided, windows, and daily PnL from today's fills blotter + settled same-day PnL — not only open-position `realized_pnl`). Unparseable resting rows fail closed (**NOT READY · HARD HOLD**). Option B / v1 caps and Dig6 unpaired-age / soft abort still apply on that rebuilt state.
+3. Auth / network / partial responses **fail closed**: stay NOT READY / hard hold, log `reconcile_failed`, retry with backoff. Do not quote blind and do not present an unverified empty book as flat.
+4. Paper-tape / mock without exchange inventory: best-effort rebuild from *today's* tape + windows, labeled **PAPER LOCAL**. An empty exchange snapshot plus that local restore may mark ready. Pre-reconcile paper restarts still lose any in-memory fills that never hit the tape.
+5. If the exchange returns positions or resting orders, the label is **EXCHANGE SYNC** and the tape is not mixed in (would double-count).
+6. Cancel-orphan policy is **off by default**. Unexpected resting orders on watched series are adopted into the local book and logged. `KALSHI_CANCEL_ORPHANS=true` may cancel them only on `--demo-submit` against demo hosts. Production never auto-cancels, even with the flag.
+7. Reconcile does **not** auto-clear the persisted daily-loss / manual kill latch (`data/kill-latch.json`). Inventory trips (open/onesided) cannot replace that latch.
+
+Defaults remain paper / dry-run. View-only / paper never POST production orders. This does **not** enable `KALSHI_ALLOW_PRODUCTION` or live submit. Risk Desk must re-check before any micro-live.
+
 Open **http://127.0.0.1:8080**. Frontend is Vite + React, served by the
 bot's FastAPI process (`/api/snapshot`, `/ws`). For UI hot-reload:
 
@@ -360,7 +382,8 @@ ruff check kalshi_pbot tests
 
 Coverage includes Risk Desk v1, quote / pair-arb logic, the paper matcher
 (join-back, through-print, ambiguous wipe, latency), events-first persist,
-and “no POST in paper-tape”.
+startup reconcile (empty / positions / resting / fail-closed), and
+“no POST in paper-tape”.
 
 ## Docker
 
@@ -400,4 +423,6 @@ only), and ML price prediction. The HUD is in scope.
 - [WebSockets](https://docs.kalshi.com/getting_started/quick_start_websockets)
 - [Public trades](https://docs.kalshi.com/websockets/public-trades)
 - [CF Benchmarks value](https://docs.kalshi.com/websockets/cfbenchmarks-value)
+- [Get Positions](https://docs.kalshi.com/api-reference/portfolio/get-positions)
+- [Get Orders](https://docs.kalshi.com/api-reference/orders/get-orders)
 - [Get series](https://docs.kalshi.com/api-reference/market/get-series) (`fee_type`)

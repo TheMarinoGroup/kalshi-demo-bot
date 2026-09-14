@@ -209,6 +209,11 @@ def status() -> None:
     typer.echo(f"taker_pair_arb   {settings.taker_pair_arb}")
     typer.echo(f"windows_path     {settings.windows_path}")
     typer.echo(f"tape_path        {settings.tape_path}")
+    typer.echo(f"kill_latch       {settings.kill_latch_path}")
+    typer.echo(
+        f"cancel_orphans   {settings.cancel_orphans}  "
+        "(demo-submit only; production never auto-cancels)"
+    )
     typer.echo(f"min_window_min   {settings.min_window_minutes}  (15m+ only)")
     typer.echo(f"hud              {settings.hud}  (:{settings.hud_port})")
 

@@ -39,6 +39,7 @@ def test_defaults_are_paper_data_plane() -> None:
     assert settings.improve_ticks == 0
     assert settings.taker_pair_arb is False
     assert settings.only_quote_underround is False
+    assert settings.cancel_orphans is False
     assert settings.kill_latch_path.endswith("kill-latch.json")
 
 

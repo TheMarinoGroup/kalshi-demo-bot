@@ -71,12 +71,21 @@ class ExecutionEngine:
         )
         self.tape = tape
         self.dry_run_orders: list[dict[str, object]] = []
+        self.ready_to_trade = True
 
     @property
     def live_submit(self) -> bool:
         return self.settings.live_submit and self.rest is not None
 
     def submit(self, intent: QuoteIntent, book: OrderBook | None = None) -> dict[str, object]:
+        if not self.ready_to_trade and increases_open_risk(intent):
+            log.warning(
+                "submit_blocked_not_ready",
+                ticker=intent.market_ticker,
+                kind=intent.kind.value,
+                reason=intent.reason,
+            )
+            return {"ok": False, "error": "not_ready", "dry_run": True}
         if increases_open_risk(intent):
             snap = self.portfolio.snapshot()
             projected = projected_open_notional(snap, intent)
@@ -252,6 +261,11 @@ class ExecutionEngine:
             return {"status": response.status_code}
 
     def cancel_all(self) -> dict[str, object]:
+        # Account-wide live cancel waits for a verified book. Paper/local
+        # and known-id flatten/cancel stay allowed during reconcile.
+        if not self.ready_to_trade and self.live_submit:
+            log.warning("cancel_all_blocked_not_ready")
+            return {"ok": False, "error": "not_ready"}
         ids = list(self.portfolio.resting)
         for oid in list(self.matcher.orders):
             self.matcher.cancel(oid, reason="cancel_all")

@@ -27,6 +27,7 @@ from kalshi_pbot.market_data import (
 from kalshi_pbot.metrics import compute_metrics, emit_metrics
 from kalshi_pbot.paper_matcher import PaperMatcher
 from kalshi_pbot.portfolio import Portfolio
+from kalshi_pbot.reconcile import Reconciler
 from kalshi_pbot.risk_engine import (
     RiskEngine,
     recycle_ready,
@@ -83,6 +84,16 @@ class PaperBot:
         self.books = OrderBookStore()
         self.maker = MakerStrategy(settings)
         self.pair_arb = PairArbStrategy(settings)
+        self.reconcile = Reconciler(
+            settings,
+            rest=rest,
+            portfolio=self.portfolio,
+            tape=self.tape,
+            execution=self.execution,
+            universe=self.universe,
+            mock=isinstance(self.client, MockKalshiClient),
+        )
+        self.reconcile.order_books = self.books
         self._stop = asyncio.Event()
         self._last_tob_ms = 0
         self._last_wipe = 0
@@ -126,6 +137,8 @@ class PaperBot:
             hud=self.settings.hud,
             min_window_minutes=self.settings.min_window_minutes,
             discover_seconds=self.settings.discover_seconds,
+            cancel_orphans=self.settings.cancel_orphans,
+            ready_to_trade=False,
         )
         try:
             self.universe.refresh()
@@ -335,6 +348,8 @@ class PaperBot:
     def step(self, now: datetime | None = None) -> list[QuoteIntent]:
         now = now or datetime.now(UTC)
         now_ms = int(now.timestamp() * 1000)
+        self.reconcile.maybe_attempt(now)
+        ready = self.portfolio.ready_to_trade
         self.portfolio.reset_day_if_needed(now)
         self._drain_matcher(now_ms)
         self._recycle_settled(now)
@@ -351,8 +366,10 @@ class PaperBot:
         self.risk.maybe_trip_limits(snapshot)
         if self.risk.kill_active:
             self._sync_kill_flags()
-            self.execution.cancel_all()
-            snapshot = self.portfolio.snapshot(books)
+            if ready:
+                # Do not account-wide-cancel an unverified production book.
+                self.execution.cancel_all()
+                snapshot = self.portfolio.snapshot(books)
 
         submitted: list[QuoteIntent] = []
 
@@ -388,7 +405,7 @@ class PaperBot:
             for intent in contained:
                 aged_tickers.add(intent.market_ticker)
 
-        if self.risk.kill_active:
+        if self.risk.kill_active or not ready:
             emit_metrics(compute_metrics(self.settings, self.portfolio, snapshot))
             self._publish_hud(now)
             return submitted
