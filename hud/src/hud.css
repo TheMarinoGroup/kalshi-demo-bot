@@ -336,6 +336,16 @@ body {
   display: flex;
   flex-direction: column;
   overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #2a3a4d transparent;
+}
+
+.col::-webkit-scrollbar {
+  width: 8px;
+}
+
+.col::-webkit-scrollbar-thumb {
+  background: #2a3a4d;
 }
 
 h2,
@@ -831,24 +841,24 @@ td {
 }
 
 .activity {
-  flex: 0 0 292px;
+  flex: 0 0 248px;
   min-height: 0;
   border-top: 1px solid var(--line);
   padding: 10px 16px 12px;
   display: grid;
   grid-template-columns: 1.15fr 1fr;
   gap: 12px;
-  background: #090d12;
+  background: #07090d;
 }
 
 .card {
-  border: 1px solid var(--line);
-  background: var(--panel);
-  padding: 10px 12px 8px;
+  border: 1px solid #2a3848;
+  background: #10161f;
+  padding: 8px 10px 7px;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.015);
+  box-shadow: inset 0 1px 0 rgba(245, 166, 35, 0.18);
 }
 
 .card-head {
@@ -901,14 +911,14 @@ td {
 
 .pnl-stats b {
   font-family: var(--mono);
-  font-size: 16px;
+  font-size: 15px;
 }
 
 .equity {
   width: 100%;
-  height: 132px;
+  height: 108px;
   flex: 1;
-  min-height: 110px;
+  min-height: 88px;
 }
 
 .equity.up .equity-line,
@@ -953,7 +963,7 @@ td {
 
 .equity.empty {
   flex: 1;
-  min-height: 110px;
+  min-height: 88px;
   display: grid;
   place-items: center;
   font-family: var(--mono);
