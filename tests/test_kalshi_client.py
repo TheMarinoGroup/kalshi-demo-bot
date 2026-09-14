@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 
 import httpx
 import pytest
+from websockets.exceptions import ConnectionClosedError
+from websockets.frames import Close
 
 from kalshi_pbot.config import Settings
 from kalshi_pbot.kalshi_client import (
     HTTP_MAX_ATTEMPTS,
     HTTP_RETRY_CAP_SECONDS,
     KalshiRestClient,
+    KalshiWebSocket,
+    is_ws_disconnect,
     parse_retry_after,
     retry_delay_seconds,
 )
@@ -145,3 +151,118 @@ def test_universe_refresh_survives_exhausted_429() -> None:
     finally:
         rest.close()
     assert chosen == []
+
+
+def _keepalive_closed() -> ConnectionClosedError:
+    return ConnectionClosedError(None, Close(1011, "keepalive ping timeout"))
+
+
+class _FakeSocket:
+    """Looks OPEN until send/read. drop_send / drop_read simulate a dead keepalive."""
+
+    def __init__(self, *, drop_send: bool = False, drop_read: bool = False) -> None:
+        self.sent: list[dict] = []
+        self.drop_send = drop_send
+        self.drop_read = drop_read
+        self.close_code = None
+        self.closed = False
+        self._hold = asyncio.Event()
+
+    async def send(self, data: str) -> None:
+        if self.drop_send:
+            raise _keepalive_closed()
+        self.sent.append(json.loads(data))
+
+    async def close(self) -> None:
+        self.closed = True
+        self.close_code = 1000
+        self._hold.set()
+
+    def __aiter__(self) -> _FakeSocket:
+        return self
+
+    async def __anext__(self) -> str:
+        if self.drop_read:
+            raise _keepalive_closed()
+        await self._hold.wait()
+        raise StopAsyncIteration
+
+
+def test_is_ws_disconnect_matches_keepalive_and_send_on_closed() -> None:
+    assert is_ws_disconnect(_keepalive_closed())
+    assert is_ws_disconnect(RuntimeError("WebSocket is not connected"))
+    assert not is_ws_disconnect(ValueError("nope"))
+
+
+async def test_subscribe_after_reconnect_on_closed_socket(monkeypatch: pytest.MonkeyPatch) -> None:
+    live = _FakeSocket()
+    connects = {"n": 0}
+
+    async def fake_connect(*args: object, **kwargs: object) -> _FakeSocket:
+        del args, kwargs
+        connects["n"] += 1
+        return live
+
+    ws = KalshiWebSocket(
+        Settings(dry_run=True, paper_tape=True, ws_url="wss://example.test/trade-api/ws/v2"),
+        private_key=object(),
+    )
+    ws._auth_headers = lambda: {}  # type: ignore[method-assign]
+    ws._ws = _FakeSocket(drop_send=True)
+    monkeypatch.setattr("kalshi_pbot.kalshi_client.websockets.connect", fake_connect)
+
+    with pytest.raises(ConnectionClosedError):
+        await ws.subscribe(["ticker"])
+
+    await ws.reconnect()
+    await ws.subscribe(["ticker"])
+
+    assert connects["n"] == 1
+    assert live.sent
+    assert live.sent[0]["cmd"] == "subscribe"
+    assert live.sent[0]["params"]["channels"] == ["ticker"]
+    await ws.close()
+
+
+async def test_run_forever_reconnects_after_keepalive_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sockets: list[_FakeSocket] = []
+
+    async def fake_connect(*args: object, **kwargs: object) -> _FakeSocket:
+        del args, kwargs
+        sock = _FakeSocket(drop_read=len(sockets) == 0)
+        sockets.append(sock)
+        return sock
+
+    ws = KalshiWebSocket(
+        Settings(dry_run=True, paper_tape=True, ws_url="wss://example.test/trade-api/ws/v2"),
+        private_key=object(),
+    )
+    ws._auth_headers = lambda: {}  # type: ignore[method-assign]
+    monkeypatch.setattr("kalshi_pbot.kalshi_client.websockets.connect", fake_connect)
+
+    subscribed = {"n": 0}
+
+    async def on_connect() -> None:
+        subscribed["n"] += 1
+        await ws.subscribe(["ticker"])
+
+    ws.add_on_connect(on_connect)
+    task = asyncio.create_task(ws.run_forever(), name="test-ws-forever")
+    try:
+        for _ in range(80):
+            if subscribed["n"] >= 2 and len(sockets) >= 2:
+                break
+            await asyncio.sleep(0.02)
+        assert subscribed["n"] >= 2
+        assert len(sockets) >= 2
+        assert any(sock.sent for sock in sockets)
+    finally:
+        await ws.close()
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass

@@ -17,7 +17,9 @@ REST (no key) is the **data** default.
 
 HTTP **429** is a rate limit: the bot retries public REST with backoff (honors
 `Retry-After`). Wait a minute if you just hammered `/events` before restarting
-`kalshi-pbot hud`.
+`kalshi-pbot hud`. Transient WebSocket drops (keepalive ping timeout, send on a
+closed socket) reconnect and resubscribe — the HUD stays up through 15m
+universe rollover.
 
 ## What it does
 

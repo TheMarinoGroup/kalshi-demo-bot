@@ -4,6 +4,9 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from websockets.exceptions import ConnectionClosedError
+from websockets.frames import Close
+
 from kalshi_pbot.config import Settings
 from kalshi_pbot.runner import PaperBot
 from kalshi_pbot.types import Fill, IntentKind, Liquidity, Outcome
@@ -158,3 +161,96 @@ def test_runner_soft_onesided_aborts_without_kill() -> None:
     assert flats
     assert all(q.reason == "unpaired_soft_abort" for q in flats)
     assert not bot.risk.kill_active
+
+
+def _keepalive_closed() -> ConnectionClosedError:
+    return ConnectionClosedError(None, Close(1011, "keepalive ping timeout"))
+
+
+class _FlakyWs:
+    """Closed on first subscribe (rollover send-on-dead), then healthy after reconnect."""
+
+    def __init__(self) -> None:
+        self.subscribe_calls = 0
+        self.reconnect_calls = 0
+        self.channels: list[list[str]] = []
+        self._ws = object()
+
+    async def subscribe(self, channels: list[str], **kwargs: object) -> None:
+        del kwargs
+        self.subscribe_calls += 1
+        self.channels.append(list(channels))
+        if self.reconnect_calls == 0:
+            raise _keepalive_closed()
+
+    async def reconnect(self) -> None:
+        self.reconnect_calls += 1
+
+    async def close(self) -> None:
+        return None
+
+
+async def test_resubscribe_reconnects_after_closed_ws_and_continues() -> None:
+    """Universe rollover send-on-closed must reconnect+resubscribe, not kill the desk."""
+    bot = PaperBot(Settings(mock=True, dry_run=True, series="KXBTC15M"))
+    bot.universe.refresh()
+    assert bot.universe.markets
+    fake = _FlakyWs()
+    bot.client.ws = fake  # type: ignore[attr-defined]
+
+    await bot._resubscribe()
+
+    assert fake.reconnect_calls == 1
+    assert fake.subscribe_calls > 1
+    assert any("ticker" in ch for ch in fake.channels)
+
+
+async def test_resubscribe_continues_if_reconnect_also_fails() -> None:
+    class _DeadWs:
+        async def subscribe(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+            raise _keepalive_closed()
+
+        async def reconnect(self) -> None:
+            raise _keepalive_closed()
+
+    bot = PaperBot(Settings(mock=True, dry_run=True, series="KXBTC15M"))
+    bot.client.ws = _DeadWs()  # type: ignore[attr-defined]
+    await bot._resubscribe()
+
+
+async def test_run_survives_closed_ws_during_universe_rollover() -> None:
+    """Main loop discover → _resubscribe on a dead socket must not end the process."""
+    settings = Settings(
+        mock=True,
+        dry_run=True,
+        series="KXBTC15M",
+        loop_seconds=0.01,
+        discover_seconds=0.03,
+    )
+    bot = PaperBot(settings)
+    fake = _FlakyWs()
+    bot.client.ws = fake  # type: ignore[attr-defined]
+
+    original = bot.universe.refresh
+    calls = {"n": 0}
+
+    def refresh_and_change(*args, **kwargs):
+        markets = original(*args, **kwargs)
+        calls["n"] += 1
+        # After startup refresh, change the ticker set so the loop resubscribes.
+        if calls["n"] >= 2 and bot.universe.markets:
+            extra = next(iter(bot.universe.markets.values()))
+            bot.universe.markets[f"{extra.ticker}-ROLL"] = extra
+        return markets
+
+    bot.universe.refresh = refresh_and_change  # type: ignore[method-assign]
+
+    async def stop_soon() -> None:
+        await asyncio.sleep(0.12)
+        bot.stop()
+
+    await asyncio.gather(bot.run(), stop_soon())
+    assert calls["n"] >= 2
+    assert fake.reconnect_calls == 1
+    assert fake.subscribe_calls > 1
