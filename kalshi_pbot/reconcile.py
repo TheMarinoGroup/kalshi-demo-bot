@@ -7,9 +7,12 @@ source of truth — the bot must rebuild risk from GET /portfolio/positions
 and GET /portfolio/orders before quoting.
 
 Fail-closed: ready_to_trade stays false on auth, network, partial
-snapshot errors, or unparseable resting/fill/settlement rows. Retry with
-backoff. Never quote blind. Daily kill on EXCHANGE SYNC uses today's
-fills blotter plus settlements, not only open-position realized_pnl.
+snapshot errors, or unparseable resting/fill/settlement rows. A 401
+auth/host mismatch is NOT READY / hard hold — do not READY, skip the
+exchange snapshot, or loosen Risk Desk caps. Retry with backoff. Never
+quote blind. Daily kill on EXCHANGE SYNC uses today's fills blotter plus
+settlements, not only open-position realized_pnl. Production order POST
+stays refused without ``KALSHI_ALLOW_PRODUCTION=1``.
 """
 
 from __future__ import annotations

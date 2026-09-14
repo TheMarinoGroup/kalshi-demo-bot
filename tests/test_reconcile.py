@@ -329,6 +329,8 @@ def test_api_error_fail_closed_no_quotes() -> None:
     state = rec.attempt()
     assert state.ready_to_trade is False
     assert state.status == STATUS_NOT_READY
+    assert state.source == ""
+    assert state.source != SOURCE_PAPER_LOCAL
     assert "401" in state.error or "HTTPStatusError" in state.error
     assert "auth/host mismatch" in state.error
     assert "Reconcile-read host" in state.error
@@ -336,6 +338,10 @@ def test_api_error_fail_closed_no_quotes() -> None:
     assert rec.portfolio.resting == {}
     assert rec.portfolio.ready_to_trade is False
     assert engine.ready_to_trade is False
+    assert settings.allow_production is False
+    assert settings.max_open_notional == Decimal("25.00")
+    assert settings.max_onesided == Decimal("15.00")
+    assert settings.daily_loss_limit == Decimal("10.00")
     result = engine.submit(
         QuoteIntent(
             market_ticker="KXBTC15M-T",
