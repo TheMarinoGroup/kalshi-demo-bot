@@ -73,6 +73,26 @@ export type LastFill = {
   ts_ms: number;
 };
 
+export type PnlPoint = {
+  t: number;
+  daily: number;
+  realized: number;
+  unrealized: number;
+  fill_count: number;
+};
+
+export type FillRow = {
+  fill_id: string;
+  ticker: string;
+  outcome: string;
+  price: number;
+  count: number;
+  notional?: number;
+  fee: number;
+  liquidity: string;
+  ts_ms: number;
+};
+
 export type HudSnapshot = {
   v: number;
   ts: string;
@@ -200,6 +220,7 @@ export type HudSnapshot = {
     open_util: number;
     onesided_util: number;
     daily_loss_util: number;
+    curve?: PnlPoint[];
   };
   windows: WindowCard[];
   upcoming: { ticker: string; series: string; open: string | null; close: string | null }[];
@@ -223,15 +244,6 @@ export type HudSnapshot = {
     remaining: number;
     liquidity: string;
   }[];
-  fills: {
-    fill_id: string;
-    ticker: string;
-    outcome: string;
-    price: number;
-    count: number;
-    fee: number;
-    liquidity: string;
-    ts_ms: number;
-  }[];
+  fills: FillRow[];
   series: string[];
 };

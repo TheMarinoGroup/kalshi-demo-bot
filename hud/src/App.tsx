@@ -1,68 +1,7 @@
+import { cls, countdown, dash, money, pct, px, shortTicker, signedCountdown } from "./format";
 import { useHud } from "./useHud";
-import type { HudSnapshot, Tone, UtilCell, WindowCard } from "./types";
-
-function money(n: number | null | undefined, digits = 2): string {
-  if (n == null || Number.isNaN(n)) return "—";
-  const sign = n < 0 ? "-" : "";
-  return `${sign}$${Math.abs(n).toFixed(digits)}`;
-}
-
-function px(n: number | null | undefined): string {
-  if (n == null) return "—";
-  return n.toFixed(2);
-}
-
-function pct(n: number | null | undefined): string {
-  if (n == null || Number.isNaN(n)) return "—";
-  return `${(n * 100).toFixed(0)}%`;
-}
-
-function countdown(seconds: number): string {
-  const s = Math.max(0, Math.floor(seconds));
-  const m = Math.floor(s / 60);
-  return `${String(m).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
-}
-
-function signedCountdown(seconds: number): string {
-  const sign = seconds < 0 ? "+" : "";
-  return `${sign}${countdown(Math.abs(seconds))}`;
-}
-
-function cls(...parts: Array<string | false | undefined>): string {
-  return parts.filter(Boolean).join(" ");
-}
-
-function pnlClass(n: number | null | undefined): string {
-  if (n == null || n === 0) return "neutral";
-  return n > 0 ? "up" : "down";
-}
-
-function Spark({ points }: { points: { mid: number }[] }) {
-  if (points.length < 2) {
-    return <div className="spark empty">NO TAPE</div>;
-  }
-  const w = 320;
-  const h = 72;
-  const mids = points.map((p) => p.mid);
-  const min = Math.min(...mids);
-  const max = Math.max(...mids);
-  const span = max - min || 0.01;
-  const d = mids
-    .map((m, i) => {
-      const x = (i / (mids.length - 1)) * w;
-      const y = h - ((m - min) / span) * (h - 4) - 2;
-      return `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(" ");
-  const last = mids[mids.length - 1];
-  const first = mids[0];
-  const up = last >= first;
-  return (
-    <svg className={cls("spark", up ? "up" : "down")} viewBox={`0 0 ${w} ${h}`} aria-hidden>
-      <path d={d} fill="none" strokeWidth="1.4" />
-    </svg>
-  );
-}
+import type { FillRow, HudSnapshot, Tone, UtilCell, WindowCard } from "./types";
+import { PnlCard, Spark, TapeCard } from "./viz";
 
 function Meter({
   label,
@@ -100,11 +39,6 @@ function Meter({
   );
 }
 
-function dash(n: number | null | undefined, digits = 2): string {
-  if (n == null || Number.isNaN(n)) return "—";
-  return n.toFixed(digits);
-}
-
 function UtilChip({ cell }: { cell: UtilCell }) {
   const count = cell.label.includes("window");
   return (
@@ -122,7 +56,7 @@ function UtilChip({ cell }: { cell: UtilCell }) {
   );
 }
 
-function WindowPanel({ win }: { win: WindowCard }) {
+function WindowPanel({ win, fills }: { win: WindowCard; fills: FillRow[] }) {
   const gateBad = win.gate_violation || (win.last_60s && win.new_risk_allowed);
   const zone = (win.ttc_zone ?? (win.last_60s ? "RED" : "GREEN")).toLowerCase();
   const cfb = win.cfb;
@@ -195,7 +129,7 @@ function WindowPanel({ win }: { win: WindowCard }) {
           live {dash(cfb?.live, 1)} · lag {dash(cfb?.lag_ms, 0)} · {cfb?.label ?? "chart≠settle"}
         </span>
       </div>
-      <Spark points={win.spark} />
+      <Spark points={win.spark} fills={fills.filter((f) => f.ticker === win.ticker)} />
       <div className="spark-note">chart ≠ settle · CFB avg60/qtr is the oracle, not live_data/spot</div>
       <footer>
         {win.gate_violation ? (
@@ -450,7 +384,7 @@ function Desk({
   clock: Date;
   onKill: () => void;
 }) {
-  const { risk, pnl, mode, kill } = snap;
+  const { risk, mode, kill } = snap;
   const liveWins = snap.windows.filter((w) => w.live);
   const utc = clock.toISOString().slice(11, 23);
 
@@ -520,7 +454,7 @@ function Desk({
           <h2>TOP OF BOOK · ACTIVE 15M+</h2>
           <div className="wins">
             {liveWins.length ? (
-              liveWins.map((w) => <WindowPanel key={w.ticker} win={w} />)
+              liveWins.map((w) => <WindowPanel key={w.ticker} win={w} fills={snap.fills} />)
             ) : (
               <p className="empty">No live 15m windows. Waiting on events-first rollover.</p>
             )}
@@ -556,7 +490,7 @@ function Desk({
               {snap.positions.length ? (
                 snap.positions.map((p) => (
                   <tr key={p.ticker}>
-                    <td>{p.ticker.replace("KXBTC15M-", "BTC ").replace("KXETH15M-", "ETH ")}</td>
+                    <td>{shortTicker(p.ticker)}</td>
                     <td>{p.yes_qty}</td>
                     <td>{p.no_qty}</td>
                     <td className={p.unpaired ? "warn" : ""}>
@@ -610,50 +544,9 @@ function Desk({
         </aside>
       </section>
 
-      <section className="bottom">
-        <div className="pnl-strip">
-          <div>
-            <label>REALIZED</label>
-            <b className={pnlClass(pnl.realized)}>{money(pnl.realized)}</b>
-          </div>
-          <div>
-            <label>UNREALIZED</label>
-            <b className={pnlClass(pnl.unrealized)}>{money(pnl.unrealized)}</b>
-          </div>
-          <div>
-            <label>DAY_PNL_NET</label>
-            <b className={pnlClass(pnl.day_pnl_net ?? pnl.daily)}>{money(pnl.day_pnl_net ?? pnl.daily)}</b>
-          </div>
-          <div>
-            <label>FILLS</label>
-            <b>
-              {pnl.fill_count}/{pnl.order_count}
-            </b>
-          </div>
-          <div>
-            <label>FILL RATE</label>
-            <b>{(pnl.fill_rate * 100).toFixed(1)}%</b>
-          </div>
-        </div>
-        <div className="fills">
-          <h2>TAPE · PAPER FILLS</h2>
-          <ul>
-            {snap.fills.length ? (
-              [...snap.fills].reverse().slice(0, 12).map((f) => (
-                <li key={f.fill_id}>
-                  <span className={cls("tag", f.liquidity)}>{f.liquidity}</span>
-                  <span>{f.ticker}</span>
-                  <span className="cyan">{f.outcome.toUpperCase()}</span>
-                  <span>{px(f.price)}</span>
-                  <span>×{f.count}</span>
-                  <span className="muted">fee {money(f.fee, 4)}</span>
-                </li>
-              ))
-            ) : (
-              <li className="muted">Awaiting conservative matcher fills (public prints only)</li>
-            )}
-          </ul>
-        </div>
+      <section className="activity" aria-label="Session PnL and paper tape">
+        <PnlCard snap={snap} />
+        <TapeCard fills={snap.fills} />
       </section>
     </div>
   );

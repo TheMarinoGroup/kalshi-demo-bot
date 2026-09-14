@@ -139,6 +139,21 @@ def test_last_fill_clip_and_fee_split(settings: Settings) -> None:
     assert snap["extras"]["taker_fills"] == 1
 
 
+def test_session_pnl_curve_and_tape_notional(settings: Settings) -> None:
+    bot = PaperBot(settings)
+    hist = MidHistory()
+    first = build_snapshot(bot, hist)
+    assert first["pnl"]["curve"]
+    assert first["pnl"]["curve"][0]["fill_count"] == 0
+    assert first["pnl"]["curve"][0]["daily"] == 0
+    bot.portfolio.apply_fill(_fill(count="20", price="0.40", fill_id="curve"))
+    second = build_snapshot(bot, hist)
+    assert len(second["pnl"]["curve"]) >= 2
+    assert second["pnl"]["curve"][-1]["fill_count"] == 1
+    assert second["fills"][-1]["notional"] == 8.0
+    assert second["fills"][-1]["ticker"] == "KXBTC15M-MOCK"
+
+
 def test_daily_pnl_includes_unsettled_until_settlement(settings: Settings) -> None:
     bot = PaperBot(settings)
     bot.portfolio.apply_fill(_fill(count="20", price="0.60"))  # $12 cost, unpaired

@@ -22,6 +22,9 @@ from kalshi_pbot.risk_engine import (
 from kalshi_pbot.types import CFBTick, Fill, MarketWindow, OrderBook, PortfolioSnapshot
 
 HISTORY_LEN = 180
+PNL_CURVE_LEN = 720
+PNL_CURVE_INTERVAL_MS = 8_000
+TAPE_FILL_LEN = 100
 
 
 def _f(value: Decimal | float | int | None) -> float | None:
@@ -77,11 +80,54 @@ def _mode_block(settings: Settings) -> dict[str, Any]:
     }
 
 
+class PnlHistory:
+    """Session equity marks. Downsamples the 50ms HUD publish loop."""
+
+    def __init__(self, maxlen: int = PNL_CURVE_LEN) -> None:
+        self._points: deque[dict[str, float]] = deque(maxlen=maxlen)
+        self._last_ms = 0
+        self._last_daily: float | None = None
+        self._last_fills = -1
+
+    def push(
+        self,
+        now_ms: int,
+        daily: float,
+        realized: float,
+        unrealized: float,
+        fill_count: int,
+        *,
+        min_interval_ms: int = PNL_CURVE_INTERVAL_MS,
+    ) -> None:
+        point = {
+            "t": float(now_ms),
+            "daily": daily,
+            "realized": realized,
+            "unrealized": unrealized,
+            "fill_count": float(fill_count),
+        }
+        changed = fill_count != self._last_fills or (
+            self._last_daily is None or abs(daily - self._last_daily) >= 0.0001
+        )
+        due = not self._points or (now_ms - self._last_ms) >= min_interval_ms
+        if not (changed or due):
+            self._points[-1] = point
+            return
+        self._points.append(point)
+        self._last_ms = now_ms
+        self._last_daily = daily
+        self._last_fills = fill_count
+
+    def series(self) -> list[dict[str, float]]:
+        return list(self._points)
+
+
 class MidHistory:
     def __init__(self, maxlen: int = HISTORY_LEN) -> None:
         self._series: dict[str, deque[dict[str, float]]] = defaultdict(
             lambda: deque(maxlen=maxlen)
         )
+        self.pnl = PnlHistory()
 
     def push(self, ticker: str, mid: Decimal | None, spread: Decimal | None, now_ms: int) -> None:
         if mid is None:
@@ -471,12 +517,22 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
             "outcome": f.outcome.value,
             "price": _f(f.price),
             "count": _f(f.count),
+            "notional": _f(f.price * f.count),
             "fee": _f(f.fee),
             "liquidity": "taker" if f.is_taker else "maker",
             "ts_ms": f.ts_ms,
         }
-        for f in bot.portfolio.fills[-40:]
+        for f in bot.portfolio.fills[-TAPE_FILL_LEN:]
     ]
+
+    now_ms = int(now.timestamp() * 1000)
+    history.pnl.push(
+        now_ms,
+        float(metrics.daily_pnl),
+        float(metrics.realized_pnl),
+        float(metrics.unrealized_pnl),
+        metrics.fill_count,
+    )
 
     band = list(SETTLE_RECYCLE_BAND)
     return {
@@ -565,6 +621,7 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
             "open_util": _f(metrics.open_notional_util),
             "onesided_util": _f(metrics.onesided_util),
             "daily_loss_util": _f(metrics.daily_loss_util),
+            "curve": history.pnl.series(),
         },
         "windows": windows,
         "upcoming": [
