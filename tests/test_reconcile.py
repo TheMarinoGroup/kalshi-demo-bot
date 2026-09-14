@@ -328,7 +328,8 @@ def test_demo_prod_credential_hint_once_on_paper_mismatch() -> None:
     assert "Demo REST needs demo API keys" in hint
     assert "paper_tape skips exchange portfolio" in hint
     assert demo_prod_credential_hint(_settings()) is None
-    assert demo_prod_credential_hint(_live_settings(ws_env="production", allow_prod_ws=True)) is None
+    live_prod_ws = _live_settings(ws_env="production", allow_prod_ws=True)
+    assert demo_prod_credential_hint(live_prod_ws) is None
 
 
 def test_empty_exchange_snapshot_marks_paper_ready() -> None:
@@ -869,7 +870,7 @@ def test_rebuilt_state_still_enforces_option_b_caps() -> None:
         liquidity=Liquidity.MAKER,
         kind=IntentKind.ENTRY,
     )
-    clip = engine.evaluate(tiny, empty_snapshot(settings), close_time=close, now=now)
+    clip = RiskEngine(settings).evaluate(tiny, empty_snapshot(settings), close_time=close, now=now)
     assert clip.allowed is False
     assert clip.reason is RejectReason.PER_FILL
     flatten = engine.evaluate(_flatten_intent(), snap, close_time=close, now=now)
