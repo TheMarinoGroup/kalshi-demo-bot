@@ -34,6 +34,9 @@ DAILY_LOSS_FRAC = Decimal("0.02")  # $20 at $1000
 ONESIDED_FRAC = Decimal("0.03")  # $30 at $1000
 MAX_CONCURRENT_WINDOWS = 2
 LAST_SECONDS_NO_RISK = 60
+# Soft abort: flatten unpaired inventory before the $30 hard onesided kill.
+# 0 disables age abort (hard cap + last-60s flatten still apply).
+DEFAULT_MAX_UNPAIRED_AGE_SECONDS = 90
 CLIP_MIN = Decimal("10")
 CLIP_MAX = Decimal("30")
 DEFAULT_CLIP = Decimal("20")
@@ -111,6 +114,10 @@ class Settings(BaseSettings):
     settle_rare_tail: bool = False
     settle_rare_tail_seconds: int = SETTLE_RARE_TAIL_SECONDS
     max_windows: int = MAX_CONCURRENT_WINDOWS
+    # Soft preference: flatten unpaired after this many seconds (not a Risk Desk kill).
+    max_unpaired_age_seconds: int = DEFAULT_MAX_UNPAIRED_AGE_SECONDS
+    # Soft preference: skip new ENTRY unless bid_sum < 1 − min_edge (Regime B).
+    only_quote_underround: bool = False
     cfb_5hz: bool = False
     windows_path: str = "data/windows.json"
     tape_path: str = "data/tape.jsonl"
@@ -142,6 +149,10 @@ class Settings(BaseSettings):
             raise ValueError("settle_recycle_seconds must be positive")
         if self.settle_rare_tail_seconds <= 0:
             raise ValueError("settle_rare_tail_seconds must be positive")
+        if self.max_unpaired_age_seconds < 0:
+            raise ValueError("max_unpaired_age_seconds must be >= 0")
+        if self.max_windows < 1:
+            raise ValueError("max_windows must be >= 1")
         if self.min_window_minutes < MIN_WINDOW_MINUTES:
             raise ValueError(
                 f"min_window_minutes must be >= {MIN_WINDOW_MINUTES} "

@@ -18,6 +18,7 @@ from kalshi_pbot.config import CLIP_MAX, CLIP_MIN, Settings
 from kalshi_pbot.types import (
     IntentKind,
     PortfolioSnapshot,
+    Position,
     QuoteIntent,
     RejectReason,
     RiskDecision,
@@ -89,6 +90,31 @@ def recycle_ready(
         expected_expiration=expected_expiration,
     )
     return _now(now) >= free
+
+
+def has_unpaired_inventory(snapshot: PortfolioSnapshot) -> bool:
+    return any(pos.unpaired_qty > 0 for pos in snapshot.positions.values())
+
+
+def unpaired_age_seconds(pos: Position, now: datetime | None = None) -> float | None:
+    if pos.unpaired_qty <= 0 or pos.unpaired_since is None:
+        return None
+    return (_now(now) - _aware(pos.unpaired_since)).total_seconds()
+
+
+def should_abort_unpaired(
+    pos: Position,
+    settings: Settings,
+    now: datetime | None = None,
+) -> bool:
+    """Soft age abort. Does not trip the $30 onesided kill."""
+    if pos.unpaired_qty <= 0:
+        return False
+    max_age = settings.max_unpaired_age_seconds
+    if max_age <= 0:
+        return False
+    age = unpaired_age_seconds(pos, now)
+    return age is not None and age >= max_age
 
 
 def classify_kill(reason: str) -> str:
@@ -177,6 +203,17 @@ class RiskEngine:
                 False,
                 RejectReason.LAST_SECONDS,
                 f"no new risk in last {self.settings.last_seconds}s before close",
+            )
+
+        if (
+            not flatten_like
+            and intent.kind is IntentKind.ENTRY
+            and has_unpaired_inventory(snapshot)
+        ):
+            return RiskDecision(
+                False,
+                RejectReason.UNPAIRED_EXISTS,
+                "no new clip while unpaired inventory exists",
             )
 
         if not flatten_like:

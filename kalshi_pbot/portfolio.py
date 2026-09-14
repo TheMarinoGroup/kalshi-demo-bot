@@ -82,6 +82,7 @@ class Portfolio:
             pos = Position(market_ticker=fill.market_ticker, event_ticker=fill.event_ticker)
             self.positions[fill.market_ticker] = pos
 
+        prev_unpaired = pos.unpaired_outcome
         notional = fill.price * fill.count
         if fill.outcome is Outcome.YES:
             pos.yes_qty += fill.count
@@ -121,6 +122,16 @@ class Portfolio:
             if pos.no_qty <= 0:
                 pos.no_qty = Decimal("0")
                 pos.no_cost = Decimal("0")
+
+        if pos.unpaired_qty <= 0:
+            pos.unpaired_since = None
+        elif pos.unpaired_outcome != prev_unpaired or pos.unpaired_since is None:
+            filled_at = (
+                datetime.fromtimestamp(fill.ts_ms / 1000, tz=UTC)
+                if fill.ts_ms
+                else datetime.now(UTC)
+            )
+            pos.unpaired_since = filled_at
 
         leftover = self.resting.get(fill.order_id)
         if leftover:
@@ -183,6 +194,7 @@ class Portfolio:
             self.directional_qty_settled += leftover_qty
             pos.yes_qty = pos.no_qty = Decimal("0")
             pos.yes_cost = pos.no_cost = Decimal("0")
+            pos.unpaired_since = None
         recycle_s = None
         settle_lag_s = None
         if close_time is not None:

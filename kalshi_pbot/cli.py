@@ -190,6 +190,8 @@ def status() -> None:
     typer.echo(f"daily_loss_kill  ${settings.daily_loss_limit}  (2%)")
     typer.echo(f"max_onesided     ${settings.max_onesided}  (3%)")
     typer.echo(f"max_windows      {settings.max_windows}")
+    typer.echo(f"unpaired_age_s   {settings.max_unpaired_age_seconds}  (soft abort; 0=off)")
+    typer.echo(f"only_underround  {settings.only_quote_underround}")
     typer.echo(f"last_seconds     {settings.last_seconds}")
     typer.echo(
         f"settle_recycle   {settings.effective_settle_recycle_seconds}s  "

@@ -140,7 +140,7 @@ class ExecutionEngine:
                     outcome=intent.outcome.value,
                     price=intent.price,
                     count=intent.count,
-                    kind=intent.kind.value,
+                    intent_kind=intent.kind.value,
                     reason=intent.reason,
                 )
         return {"order_id": paper_id, "client_order_id": oid, "dry_run": True, "paper_tape": True}

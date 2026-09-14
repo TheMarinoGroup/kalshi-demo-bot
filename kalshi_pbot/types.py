@@ -46,6 +46,7 @@ class RejectReason(StrEnum):
     OPEN_NOTIONAL = "open_notional"
     CONCURRENT_WINDOWS = "concurrent_windows"
     ONESIDED_CAP = "onesided_cap"
+    UNPAIRED_EXISTS = "unpaired_exists"
     INVALID = "invalid"
 
 
@@ -235,6 +236,8 @@ class Position:
     no_cost: Decimal = Decimal("0")
     realized_pnl: Decimal = Decimal("0")
     fees: Decimal = Decimal("0")
+    # First time this position became unpaired. Cleared when the pair completes.
+    unpaired_since: datetime | None = None
 
     @property
     def paired_qty(self) -> Decimal:

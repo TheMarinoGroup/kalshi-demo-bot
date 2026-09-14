@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from decimal import Decimal
 
 from kalshi_pbot.config import Settings
-from kalshi_pbot.strategy.maker import MakerStrategy, clip_count, join_bid, paired_clip_count
-from kalshi_pbot.types import IntentKind, Outcome
+from kalshi_pbot.strategy.maker import (
+    MakerStrategy,
+    clip_count,
+    is_underround,
+    join_bid,
+    paired_clip_count,
+)
+from kalshi_pbot.types import IntentKind, Liquidity, Outcome
 from tests.conftest import book, empty_snapshot, yes_position
 
 
@@ -87,6 +94,84 @@ def test_two_sided_seeds_missing_side_at_tick(settings: Settings, market) -> Non
     by_outcome = {q.outcome: q for q in quotes}
     assert Outcome.YES in by_outcome and Outcome.NO in by_outcome
     assert by_outcome[Outcome.NO].price == settings.tick_size
+
+
+def test_no_new_onesided_when_unpaired_exists_other_ticker(
+    settings: Settings, market, now
+) -> None:
+    strategy = MakerStrategy(settings)
+    other = yes_position("KXETH15M-OTHER", qty="20", px="0.50")
+    snap = empty_snapshot(
+        settings,
+        positions={other.market_ticker: other},
+        unpaired_notional=other.unpaired_notional(),
+    )
+    quotes = strategy.evaluate(market, book("0.4700", "0.4800"), snap, now=now)
+    assert quotes == []
+
+
+def test_unpaired_age_abort_flattens(settings: Settings, market, now) -> None:
+    settings = settings.model_copy(update={"max_unpaired_age_seconds": 90})
+    strategy = MakerStrategy(settings)
+    pos = yes_position(unpaired_since=now - timedelta(seconds=120))
+    snap = empty_snapshot(settings, positions={pos.market_ticker: pos})
+    quotes = strategy.evaluate(market, book("0.4700", "0.4800"), snap, now=now)
+    assert len(quotes) == 1
+    assert quotes[0].kind is IntentKind.FLATTEN
+    assert quotes[0].sell is True
+    assert quotes[0].outcome is Outcome.YES
+    assert quotes[0].reason == "unpaired_age_abort"
+    assert quotes[0].liquidity is Liquidity.TAKER
+
+
+def test_unpaired_cannot_complete_flattens(settings: Settings, market, now) -> None:
+    strategy = MakerStrategy(settings)
+    pos = yes_position(unpaired_since=now)
+    snap = empty_snapshot(settings, positions={pos.market_ticker: pos})
+    # Completing NO cannot post: implied NO ask is 0.01 (yes bid 0.99).
+    quotes = strategy.evaluate(market, book("0.9900", "0.0100"), snap, now=now)
+    assert len(quotes) == 1
+    assert quotes[0].kind is IntentKind.FLATTEN
+    assert quotes[0].reason == "unpaired_cannot_complete"
+    assert quotes[0].outcome is Outcome.YES
+
+
+def test_fresh_unpaired_still_prefers_complete(settings: Settings, market, now) -> None:
+    settings = settings.model_copy(update={"max_unpaired_age_seconds": 90})
+    strategy = MakerStrategy(settings)
+    pos = yes_position(unpaired_since=now - timedelta(seconds=10))
+    snap = empty_snapshot(settings, positions={pos.market_ticker: pos})
+    quotes = strategy.evaluate(market, book("0.4700", "0.4800"), snap, now=now)
+    assert len(quotes) == 1
+    assert quotes[0].kind is IntentKind.COMPLETE_PAIR
+    assert quotes[0].outcome is Outcome.NO
+
+
+def test_only_quote_underround_skips_overround(settings: Settings, market, now) -> None:
+    settings = settings.model_copy(
+        update={"only_quote_underround": True, "min_edge": Decimal("0.02")}
+    )
+    strategy = MakerStrategy(settings)
+    overround = book("0.5100", "0.5000")
+    assert overround.bid_sum() == Decimal("1.01")
+    assert not is_underround(overround, Decimal("0.02"))
+    assert strategy.evaluate(market, overround, empty_snapshot(settings), now=now) == []
+
+    under = book("0.4700", "0.4800")
+    assert is_underround(under, Decimal("0.02"))
+    quotes = strategy.evaluate(market, under, empty_snapshot(settings), now=now)
+    assert quotes
+
+
+def test_only_quote_underround_still_completes(settings: Settings, market, now) -> None:
+    settings = settings.model_copy(update={"only_quote_underround": True})
+    strategy = MakerStrategy(settings)
+    pos = yes_position(unpaired_since=now)
+    snap = empty_snapshot(settings, positions={pos.market_ticker: pos})
+    overround = book("0.5100", "0.5000")
+    quotes = strategy.evaluate(market, overround, snap, now=now)
+    assert quotes
+    assert quotes[0].kind is IntentKind.COMPLETE_PAIR
 
 
 def test_quote_stays_inside_implied_ask(settings: Settings, market) -> None:

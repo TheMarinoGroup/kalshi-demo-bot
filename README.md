@@ -97,9 +97,40 @@ demo-fill confirmation** (`pending_demo_confirm=true` in logs).
 **Capital velocity.** Tiny clips, recycle **~60–90s after close** (default
 75s) once a result is known — not 5–6 minutes and not
 `expected_expiration`. Unsettled MTM still counts toward the daily kill
-until recycle. Unpaired inventory above the one-sided cap is aborted
-(flatten / do not add). Last 60s: cancel quotes; do not complete pairs;
-flatten unpaired if a bid exists.
+until recycle. Completing an incomplete pair is always preferred over a
+new one-sided clip. Unpaired inventory is aborted on age
+(`KALSHI_MAX_UNPAIRED_AGE_SECONDS`, default 90s) or when the completing
+side cannot be quoted — not only at the $30 onesided kill. A new
+one-sided clip is refused while unpaired inventory exists on any other
+window/ticker. Last 60s: cancel quotes; do not complete pairs; flatten
+unpaired if a bid exists.
+
+### Overnight soak lesson (paper)
+
+A paper overnight soak tripped **onesided ≥ $30** with `day_pnl_net` ≈
+−$24.7 (unrealized ≈ −$25.5, realized +$0.76, fees ≈ $0). The loss was
+**unpaired one-sided MTM**, not taker fees. Do not warehouse leftover
+YES or NO across windows; finish or flatten the open clip first.
+
+Recommended **paper profit-retry** env (still dry-run / paper-tape; no
+production orders):
+
+```bash
+KALSHI_DRY_RUN=true
+KALSHI_PAPER_TAPE=true
+KALSHI_SERIES=KXBTC15M
+KALSHI_MAX_WINDOWS=1
+KALSHI_CLIP_DOLLARS=10
+KALSHI_MIN_EDGE=0.04
+KALSHI_MAX_UNPAIRED_AGE_SECONDS=90
+KALSHI_ONLY_QUOTE_UNDERROUND=true
+KALSHI_QUOTE_MODE=one_sided
+```
+
+`max_windows=1` + BTC-only is single-series friendly. Soft knobs
+(`max_unpaired_age_seconds`, `only_quote_underround`) can be stricter
+than Risk Desk v1 hard caps; they do not raise or disable the $30 / $50 /
+$20 kills.
 
 ## Paper matcher
 
@@ -136,10 +167,10 @@ CLI (kalshi-pbot) ── runner.PaperBot
 | `kalshi_pbot/paper_matcher.py` | Conservative local matcher + latency |
 | `kalshi_pbot/tape.py` | Append-only JSONL research tape (`v=1`) |
 | `kalshi_pbot/expectancy.py` | Tape replay hook for later 7×24h runs |
-| `kalshi_pbot/strategy/maker.py` | One-sided / controlled two-sided post-only quotes |
+| `kalshi_pbot/strategy/maker.py` | One-sided / controlled two-sided post-only quotes; unpaired complete / age abort |
 | `kalshi_pbot/strategy/pair_arb.py` | Maker–maker and optional taker–taker pairing |
 | `kalshi_pbot/fees.py` | Quadratic taker / maker fee + `fee_drag` |
-| `kalshi_pbot/risk_engine.py` | Hard gates (last-60s, daily kill, caps) |
+| `kalshi_pbot/risk_engine.py` | Hard gates (last-60s, daily kill, caps) + soft unpaired-exists reject |
 | `kalshi_pbot/execution.py` | Paper register or `POST /portfolio/events/orders` |
 | `kalshi_pbot/portfolio.py` | Fills, paired PnL, one-sided notional, post-close recycle |
 | `kalshi_pbot/runner.py` | Discover → decide → risk → match / execute |
