@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from kalshi_pbot.fees import fee_drag, maker_fee, maker_pair_viable, pair_edge
+from kalshi_pbot.fees import (
+    arb_taker_eligible,
+    fee_drag,
+    maker_fee,
+    maker_pair_viable,
+    pair_cost,
+    pair_edge,
+)
 
 
 def test_maker_fee_zero_on_quadratic_series() -> None:
@@ -51,3 +58,26 @@ def test_fee_drag_taker_not_pending() -> None:
     drag = fee_drag(Decimal("0.50"), Decimal("1"), is_taker=True)
     assert drag.charged == Decimal("0.017500")
     assert drag.pending_demo_confirm is False
+
+
+def test_arb_taker_eligible_is_after_fee_ask_lock_not_underround() -> None:
+    # Typical soft underround (bid_sum 0.95): taking both asks is 1.05 + ~3.5¢ > 1.
+    assert not arb_taker_eligible(Decimal("0.53"), Decimal("0.52"))
+    _premium, fees = pair_cost(
+        Decimal("0.53"),
+        Decimal("0.52"),
+        Decimal("1"),
+        yes_is_taker=True,
+        no_is_taker=True,
+    )
+    assert Decimal("1.05") + fees > 1
+    # Crossed book: ask_sum 0.60 + taker fees still < 1.
+    assert arb_taker_eligible(Decimal("0.30"), Decimal("0.30"))
+    _p2, fees2 = pair_cost(
+        Decimal("0.30"),
+        Decimal("0.30"),
+        Decimal("1"),
+        yes_is_taker=True,
+        no_is_taker=True,
+    )
+    assert Decimal("0.60") + fees2 < 1

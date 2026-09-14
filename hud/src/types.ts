@@ -47,8 +47,11 @@ export type WindowCard = {
   bid_sum?: number | null;
   ask_sum?: number | null;
   ask_sum_plus_fees?: number | null;
+  /** Regime B: bid_sum ≤ 1 − min_edge (paper-v2 underround helper). Not taker-lock. */
   underround?: boolean;
+  /** Dig4 Regime A: ask_sum + modeled taker fees/C < 1. Never a green ARB for underround. */
   arb_taker_eligible?: boolean;
+  /** Alias of arb_taker_eligible only. Must stay false on underround books. */
   arb?: boolean;
   mid: number | null;
   spread: number | null;
