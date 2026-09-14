@@ -473,9 +473,11 @@ class PaperBot:
         if pos and pos.unpaired_outcome is not None:
             return self.maker.evaluate(market, book, snapshot, now=now)
 
-        pair_quotes = self.pair_arb.evaluate(market, book, snapshot)
-        if pair_quotes:
-            return pair_quotes
+        # Pair-arb is two-sided. Paper-v2 Option B stays one_sided.
+        if self.settings.quote_mode == "two_sided":
+            pair_quotes = self.pair_arb.evaluate(market, book, snapshot)
+            if pair_quotes:
+                return pair_quotes
         return self.maker.evaluate(market, book, snapshot, now=now)
 
     def _aged_unpaired_markets(self, snapshot, now: datetime) -> list[MarketWindow]:

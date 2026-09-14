@@ -24,7 +24,13 @@ def test_defaults_are_paper_data_plane() -> None:
     assert settings.discover_series_delay == 0.4
     assert settings.effective_settle_recycle_seconds == 75
     assert settings.settle_rare_tail is False
-    assert settings.max_windows == 2
+    assert settings.bankroll == Decimal("500")
+    assert settings.clip == Decimal("10")
+    assert settings.max_open_notional == Decimal("25.00")
+    assert settings.max_onesided == Decimal("15.00")
+    assert settings.daily_loss_limit == Decimal("10.00")
+    assert settings.max_windows == 1
+    assert settings.series_tickers == ("KXBTC15M",)
     assert settings.max_unpaired_age_seconds == 45
     assert settings.soft_onesided == Decimal("10")
     assert settings.last_seconds == 120
@@ -69,7 +75,6 @@ def test_latency_must_be_bucket() -> None:
 
 
 def test_unpaired_age_and_windows_validation() -> None:
-    assert Settings(max_unpaired_age_seconds=0).max_unpaired_age_seconds == 0
     with pytest.raises(ValueError, match="max_unpaired_age_seconds"):
         Settings(max_unpaired_age_seconds=-1)
     with pytest.raises(ValueError, match="soft_onesided"):
@@ -78,6 +83,10 @@ def test_unpaired_age_and_windows_validation() -> None:
         Settings(last_seconds=59)
     with pytest.raises(ValueError, match="max_windows"):
         Settings(max_windows=0)
+    with pytest.raises(ValueError, match="soft abort is mandatory"):
+        Settings(max_unpaired_age_seconds=0)
+    fat = Settings(bankroll=Decimal("1000"), max_unpaired_age_seconds=0)
+    assert fat.max_unpaired_age_seconds == 0
     assert Settings(max_windows=1, series="KXBTC15M").max_windows == 1
     assert Settings(last_seconds=60).last_seconds == 60
 

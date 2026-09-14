@@ -29,6 +29,8 @@ def test_join_bid_empty_book_seeds_one_tick() -> None:
 def test_clip_count_uses_bankroll_clip() -> None:
     assert clip_count(Decimal("20"), Decimal("0.50")) == Decimal("40")
     assert clip_count(Decimal("20"), Decimal("0.80")) == Decimal("25")
+    # Option B $10 clip must still clear the $10 notional floor (0.48×20 = $9.60).
+    assert clip_count(Decimal("10"), Decimal("0.48")) == Decimal("21")
 
 
 def test_paired_clip_keeps_both_legs_in_band() -> None:
@@ -51,22 +53,22 @@ def test_paired_clip_keeps_both_legs_in_band() -> None:
     ) is None
 
 
-def test_one_sided_quotes_wider_spread(settings: Settings, market) -> None:
+def test_one_sided_quotes_wider_spread(settings: Settings, market, now) -> None:
     strategy = MakerStrategy(settings)
     # YES spread 0.52-0.47=0.05; NO spread 0.53-0.50=0.03 → quote YES
     snap = empty_snapshot(settings)
-    quotes = strategy.evaluate(market, book("0.4700", "0.4800"), snap)
+    quotes = strategy.evaluate(market, book("0.4700", "0.4800"), snap, now=now)
     assert len(quotes) == 1
     assert quotes[0].outcome is Outcome.YES
     assert quotes[0].post_only
     assert quotes[0].kind is IntentKind.ENTRY
 
 
-def test_prefers_completing_incomplete_pair(settings: Settings, market) -> None:
+def test_prefers_completing_incomplete_pair(settings: Settings, market, now) -> None:
     strategy = MakerStrategy(settings)
     pos = yes_position(qty="20", px="0.50")  # $10 — at soft cap, still complete
     snap = empty_snapshot(settings, positions={pos.market_ticker: pos})
-    quotes = strategy.evaluate(market, book("0.4700", "0.4800"), snap)
+    quotes = strategy.evaluate(market, book("0.4700", "0.4800"), snap, now=now)
     assert len(quotes) == 1
     assert quotes[0].outcome is Outcome.NO
     assert quotes[0].kind is IntentKind.COMPLETE_PAIR
@@ -85,15 +87,17 @@ def test_complete_other_side_after_touch_stays_one_sided(settings: Settings, mar
     assert quotes[0].post_only
 
 
-def test_two_sided_emits_both_when_join_sum_below_one(settings: Settings, market) -> None:
+def test_two_sided_emits_both_when_join_sum_below_one(settings: Settings, market, now) -> None:
     settings = settings.model_copy(update={"quote_mode": "two_sided"})
     strategy = MakerStrategy(settings)
-    quotes = strategy.evaluate(market, book("0.4700", "0.4800"), empty_snapshot(settings))
+    quotes = strategy.evaluate(
+        market, book("0.4700", "0.4800"), empty_snapshot(settings), now=now
+    )
     assert len(quotes) == 2
     assert quotes[0].price + quotes[1].price < Decimal("1")
 
 
-def test_two_sided_seeds_missing_side_at_tick(settings: Settings, market) -> None:
+def test_two_sided_seeds_missing_side_at_tick(settings: Settings, market, now) -> None:
     from kalshi_pbot.types import OrderBook, PriceLevel
 
     settings = settings.model_copy(update={"quote_mode": "two_sided"})
@@ -103,7 +107,7 @@ def test_two_sided_seeds_missing_side_at_tick(settings: Settings, market) -> Non
         yes_bids=[PriceLevel(Decimal("0.4700"), Decimal("10"))],
         no_bids=[],
     )
-    quotes = strategy.evaluate(market, one_sided_book, empty_snapshot(settings))
+    quotes = strategy.evaluate(market, one_sided_book, empty_snapshot(settings), now=now)
     by_outcome = {q.outcome: q for q in quotes}
     assert Outcome.YES in by_outcome and Outcome.NO in by_outcome
     assert by_outcome[Outcome.NO].price == settings.tick_size
@@ -201,9 +205,11 @@ def test_only_quote_underround_still_completes(settings: Settings, market, now) 
     assert quotes[0].kind is IntentKind.COMPLETE_PAIR
 
 
-def test_quote_stays_inside_implied_ask(settings: Settings, market) -> None:
+def test_quote_stays_inside_implied_ask(settings: Settings, market, now) -> None:
     strategy = MakerStrategy(settings)
-    quotes = strategy.evaluate(market, book("0.4800", "0.5100"), empty_snapshot(settings))
+    quotes = strategy.evaluate(
+        market, book("0.4800", "0.5100"), empty_snapshot(settings), now=now
+    )
     assert quotes
     q = quotes[0]
     if q.outcome is Outcome.YES:

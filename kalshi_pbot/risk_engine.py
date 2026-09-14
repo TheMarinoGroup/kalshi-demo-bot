@@ -1,5 +1,6 @@
-"""Risk Desk v1 — locked hard limits for the $1000 paper bankroll.
+"""Risk Desk v1 — locked hard limits (5% / 3% / 2% of bankroll).
 
+Paper-v2 Option B defaults are $500: open $25, onesided $15, daily $10.
 Limits rescale with `settings.bankroll`. Kill switch cancels/refuses
 until an explicit reset. Last 60s of each window: no new risk.
 
@@ -103,7 +104,7 @@ def unpaired_age_seconds(pos: Position, now: datetime | None = None) -> float | 
 
 
 def over_soft_onesided(pos: Position, settings: Settings) -> bool:
-    """True when unpaired notional is strictly above the soft $10 preference."""
+    """True when unpaired notional is strictly above the soft onesided preference."""
     if pos.unpaired_qty <= 0 or settings.soft_onesided <= 0:
         return False
     return pos.unpaired_notional() > settings.soft_onesided
@@ -114,7 +115,7 @@ def should_abort_unpaired(
     settings: Settings,
     now: datetime | None = None,
 ) -> bool:
-    """Soft flatten: age or notional over the $10 preference. Does not trip the $30 kill."""
+    """Soft flatten: age or notional over the soft preference. Does not trip the hard kill."""
     if pos.unpaired_qty <= 0:
         return False
     if over_soft_onesided(pos, settings):

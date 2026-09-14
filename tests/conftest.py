@@ -24,7 +24,13 @@ def _research_paths(tmp_path, monkeypatch) -> None:
 
 @pytest.fixture
 def settings() -> Settings:
-    return Settings(bankroll=Decimal("1000"), dry_run=True, mock=True, paper_tape=True)
+    return Settings(
+        bankroll=Decimal("1000"),
+        dry_run=True,
+        mock=True,
+        paper_tape=True,
+        max_windows=2,
+    )
 
 
 @pytest.fixture

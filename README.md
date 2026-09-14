@@ -1,8 +1,8 @@
 # kalshi-demo-bot
 
 Paper-trading **sampler** for Kalshi crypto Up/Down markets at
-**15 minutes or greater only** (primary `KXBTC15M`, `KXETH15M`; later
-1H/4H clips are allowed). It does **not** trade Polymarket-style
+**15 minutes or greater only** (paper-v2 Option B default `KXBTC15M`;
+`KXETH15M` and later 1H/4H clips are allowed). It does **not** trade Polymarket-style
 5-minute markets. It is a short-window **liquidity provider /
 statistical scalper**, not a directional crypto book and **not a live trader**.
 
@@ -23,7 +23,7 @@ HTTP **429** is a rate limit: the bot retries public REST with backoff (honors
 
 1. **Events-first rollover** via `GET /events?status=open` and
    `GET /events?status=unopened` (not `/markets?status=unopened`) for
-   `KXBTC15M` + `KXETH15M`. The live 15m clip is usually a nested
+   configured series (default `KXBTC15M`). The live 15m clip is usually a nested
    `active` market under `status=unopened`; `status=open` is often the
    window that just determined. Windows persist to `data/windows.json`.
 2. Rebuilds the Kalshi **bids-only** book. Implied ask = `1 − opposite bid`.
@@ -31,7 +31,7 @@ HTTP **429** is a rate limit: the bot retries public REST with backoff (honors
 3. Auth WS (demo or read-only prod): `orderbook_delta` + `trade` + `ticker` +
    `market_lifecycle_v2` + `cfbenchmarks_value` (optional 5 Hz). CFB indices:
    BTC `BRTI`, ETH `ETHUSD_RTI`.
-4. Evaluates maker quotes and maker–maker pair arb.
+4. Evaluates maker quotes. Pair arb runs only when `quote_mode=two_sided`.
 5. Pushes every intent through **Risk Desk v1** before it is registered.
 6. **Local paper matcher** — join the **back** of the book; fills only from
    public trades at or through our price; ambiguous size wipes = **no fill**.
@@ -59,21 +59,27 @@ conservative tail.
 Architecture supports later **7×24h tape / expectancy** runs. v1 ships the
 modules (`tape`, `expectancy`) plus the dry-run / paper-tape path.
 
-## Risk Desk v1 (locked, $1000 paper bankroll)
+## Risk Desk v1 (locked fractions; paper-v2 Option B at $500)
 
-| Limit | At $1000 | Rescale |
+| Limit | At $500 (Option B default) | Rescale |
 | --- | --- | --- |
-| Per fill / clip | $10–$30 (default $20) | absolute band |
-| Max open notional | $50 | 5% of bankroll |
-| Max concurrent 15m windows | 2 | config |
-| Daily loss kill (realized + fees + unsettled MTM) | $20 | 2% of bankroll |
-| Max incomplete / one-sided inventory | $30 | 3% of bankroll |
-| Last 60s before `close_time` | no new risk floor; cancel / flatten only | config (paper-v2-tight uses 120s) |
+| Per fill / clip | $10–$30 (default $10) | absolute band |
+| Max open notional | $25 | 5% of bankroll |
+| Max concurrent 15m windows | 1 | config |
+| Daily loss kill (realized + fees + unsettled MTM) | $10 | 2% of bankroll |
+| Max incomplete / one-sided inventory | $15 | 3% of bankroll |
+| Last 60s before `close_time` | no new risk floor; cancel / flatten only | config (paper-v2 uses 120s) |
 | Paper recycle after close | 75s default (60–90s band; p99≈59s) | `KALSHI_SETTLE_RECYCLE_SECONDS` |
 | Rare-tail settle lock | off; 300s if enabled | `KALSHI_SETTLE_RARE_TAIL` — **not** `expected_expiration` |
 | Kill switch | cancel resting, block entries until process restart | — |
 
 Change `KALSHI_BANKROLL` and the percentage limits move with it. Paper only.
+
+**Daily kill $10 = 1× clip**, so the soft layer is mandatory: abort unpaired
+above $10 or after 45s, complete the other side after any touch, and refuse
+a new one-sided clip while unpaired exists. Disabling soft abort
+(`soft_onesided=0` or `max_unpaired_age_seconds=0`) is refused when daily
+kill ≤ clip.
 
 ## Strategy notes
 
@@ -102,31 +108,35 @@ until recycle. Completing an incomplete pair is always preferred over a
 new one-sided clip. Unpaired inventory is aborted on age
 (`KALSHI_MAX_UNPAIRED_AGE_SECONDS`, default 45s), when unpaired notional
 is **above** the soft $10 preference (`KALSHI_SOFT_ONESIDED`), or when
-the completing side cannot be quoted — not only at the $30 onesided
+the completing side cannot be quoted — not only at the hard onesided
 kill. A $10 clip at the soft cap is still completed; growth past $10 is
 flattened. A new one-sided clip is refused while unpaired inventory
 exists on any other window/ticker. Last 120s (config; Risk Desk floor
 60s): cancel quotes; do not complete pairs; flatten unpaired if a bid
 exists.
 
-### Overnight soak lesson + paper-v2-tight (paper)
+### Overnight soak lesson + paper-v2 Option B (paper)
 
 A paper overnight soak tripped **onesided ≥ $30** with `day_pnl_net` ≈
 −$24.7 (unrealized ≈ −$25.5, realized +$0.76, fees ≈ $0). The loss was
 **unpaired one-sided MTM**, not taker fees. Do not warehouse leftover
 YES or NO across windows; finish or flatten the open clip first.
 
-**Paper-v2-tight** keeps `QUOTE_MODE=one_sided` and completes the other
-side after any touch. Soft preferences (not kills): onesided abort above
-$10, unpaired age 45s, no-new-risk last 120s, `MIN_EDGE=0.04`
-(`bid_sum ≤ 0.96`).
+**Paper-v2 Option B** is an explicit state machine (`FLAT` → `COMPLETE` →
+`SOFT_ABORT` / `BLOCK_NEW` / `LAST_SECONDS` / `HARD_KILL`). It stays
+`QUOTE_MODE=one_sided` (not `two_sided`). Soft layer (mandatory at $500
+because daily kill = 1× clip): onesided abort above $10, unpaired age
+45s, complete-other-side after any touch, no new onesided while unpaired
+exists, `MIN_EDGE=0.04` (`bid_sum ≤ 0.96`), `improve_ticks=0`,
+`taker_pair_arb=false`.
 
-Recommended **paper-v2-tight** env (still dry-run / paper-tape; no
+These are now the code defaults (still dry-run / paper-tape; no
 production orders):
 
 ```bash
 KALSHI_DRY_RUN=true
 KALSHI_PAPER_TAPE=true
+KALSHI_BANKROLL=500
 KALSHI_SERIES=KXBTC15M
 KALSHI_MAX_WINDOWS=1
 KALSHI_CLIP_DOLLARS=10
@@ -140,9 +150,8 @@ KALSHI_SOFT_ONESIDED=10
 KALSHI_ONLY_QUOTE_UNDERROUND=true
 ```
 
-`max_windows=1` + BTC-only is single-series friendly. Soft knobs can be
-stricter than Risk Desk v1 hard caps; they do not raise or disable the
-$30 / $50 / $20 kills.
+Soft knobs fire before the Option B hard caps ($25 / $15 / $10). Do not
+disable soft abort on this bankroll.
 
 Later soak pass bar (paper): **0 kills**; `day_pnl_net > 0` over
 **≥ 96 BTC windows**; incomplete-pair **< 10%**; peak onesided **≤ $10**.
@@ -227,11 +236,11 @@ account at [https://demo.kalshi.co/](https://demo.kalshi.co/):
 KALSHI_API_KEY_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 KALSHI_PRIVATE_KEY_PATH=/absolute/path/to/kalshi-demo.key
 KALSHI_ENV=demo
-KALSHI_BANKROLL=1000
+KALSHI_BANKROLL=500
 KALSHI_DRY_RUN=true
 KALSHI_PAPER_TAPE=true
 KALSHI_LATENCY_MS=150
-KALSHI_SERIES=KXBTC15M,KXETH15M
+KALSHI_SERIES=KXBTC15M
 ```
 
 Never commit `.env`, `*.key`, or `*.pem`.
@@ -246,7 +255,7 @@ kalshi-pbot discover
 kalshi-pbot run --dry-run --latency 150
 ```
 
-Fully offline mock (synthetic `KXBTC15M` / `KXETH15M` windows + paper matcher):
+Fully offline mock (synthetic 15m crypto windows + paper matcher):
 
 ```bash
 kalshi-pbot discover --mock
@@ -302,8 +311,8 @@ The desk is wired to live bot/paper state. Risk Desk MUST-SHOW panels:
 Prioritized Dig #4 fields on each live 15m card: **TTC zone** GREEN/AMBER/RED
 (>180 / 180–60 / ≤60), **NO NEW RISK** banner on `last60s_lock`, TOB with
 sizes + `bid_sum`/`ask_sum`, UNDERROUND vs REGIME A/TAKER-ARB (never a green
-ARB chip for underround), `util_open` $/$50, `util_onesided`
-$/$30, `util_windows` n/2, `day_pnl_net` vs −$20 (incl. unsettled),
+ARB chip for underround), `util_open` $/$25, `util_onesided`
+$/$15, `util_windows` n/1, `day_pnl_net` vs −$10 (incl. unsettled),
 `settlement_ts` + `capital_free_at = max(settlement_ts, close+60–90s)`
 (**not** `expected_expiration`), `floor_strike` + CFB avg60/qtr_avg with
 **chart≠settle** (live spot is not the oracle), fee drag + paper tape,
@@ -311,12 +320,12 @@ unpaired-abort / kill strobe. CFB lag and maker fee show **—** until
 measured.
 
 1. Mode badge — **PAPER** only (LIVE without approval = hard-stop visual)
-2. Bankroll — config-driven (`KALSHI_BANKROLL`, default $1,000)
-3. Clip / last fill — $10–$30 band (default $20)
-4. Open notional util — $ / $50 + % bar (≥80% amber; ≥$50 red/kill)
-5. Windows in flight — n / 2
-6. One-sided / incomplete pair — $ / $30 + leg/ticker (abort unpaired)
-7. Daily PnL + kill — day PnL vs −$20, **including unsettled until `settlement_ts`**
+2. Bankroll — config-driven (`KALSHI_BANKROLL`, default $500)
+3. Clip / last fill — $10–$30 band (default $10)
+4. Open notional util — $ / $25 + % bar (≥80% amber; ≥$25 red/kill)
+5. Windows in flight — n / 1
+6. One-sided / incomplete pair — $ / $15 + leg/ticker (abort unpaired)
+7. Daily PnL + kill — day PnL vs −$10, **including unsettled until `settlement_ts`**
 8. Fee drag — fees today + maker/taker split (maker $0 pending confirm)
 9. Last-60s gate — time-to-close per window + `new_risk_allowed` (violation = red)
 10. Settle buffer / unlock — free on `settlement_ts`; plan 60–90s (**not** `expected_expiration` +5m)

@@ -27,25 +27,27 @@ DEMO_WS = "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2"
 PROD_REST = "https://external-api.kalshi.com/trade-api/v2"
 PROD_WS = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
 
-# Risk Desk v1 — locked fractions / dollars at the $1000 reference bankroll.
-REF_BANKROLL = Decimal("1000")
-OPEN_NOTIONAL_FRAC = Decimal("0.05")  # $50 at $1000
-DAILY_LOSS_FRAC = Decimal("0.02")  # $20 at $1000
-ONESIDED_FRAC = Decimal("0.03")  # $30 at $1000
-MAX_CONCURRENT_WINDOWS = 2
+# Risk Desk fractions (locked). Paper-v2 Option B reference bankroll is $500:
+# hard open $25 / onesided $15 / daily kill $10. Soft abort is mandatory
+# because daily kill = 1× clip. Fractions still rescale with KALSHI_BANKROLL.
+REF_BANKROLL = Decimal("500")
+OPEN_NOTIONAL_FRAC = Decimal("0.05")  # $25 at $500
+DAILY_LOSS_FRAC = Decimal("0.02")  # $10 at $500
+ONESIDED_FRAC = Decimal("0.03")  # $15 at $500
+MAX_CONCURRENT_WINDOWS = 1
 LAST_SECONDS_NO_RISK = 60
-# Paper-v2-tight: no new risk earlier than the Risk Desk 60s floor.
+# Paper-v2: no new risk earlier than the Risk Desk 60s floor.
 PAPER_V2_LAST_SECONDS = 120
-# Soft abort: flatten unpaired inventory before the $30 hard onesided kill.
-# 0 disables age abort (hard cap + last-60s flatten still apply).
+# Soft abort: flatten unpaired before the hard onesided kill ($15 at $500).
+# 0 disables age abort only when daily kill > clip (not Option B).
 DEFAULT_MAX_UNPAIRED_AGE_SECONDS = 45
-# Soft onesided flatten / no-grow preference. Hard kill stays ONESIDED_FRAC ($30).
+# Soft onesided flatten / no-grow. Hard kill stays ONESIDED_FRAC ($15 at $500).
 DEFAULT_SOFT_ONESIDED = Decimal("10")
 CLIP_MIN = Decimal("10")
 CLIP_MAX = Decimal("30")
-DEFAULT_CLIP = Decimal("20")
+DEFAULT_CLIP = Decimal("10")
 DEFAULT_MIN_EDGE = Decimal("0.04")
-DEFAULT_SERIES = ("KXBTC15M", "KXETH15M")
+DEFAULT_SERIES = ("KXBTC15M",)
 # Measured close→settlement_ts on public REST, N=8000 finalized
 # KXBTC15M+KXETH15M: p50≈7s, p90≈12s, p99≈59s. ~99% settle within 60s.
 # market.expected_expiration (~close+300s) is NOT actual settlement latency —
@@ -108,7 +110,7 @@ class Settings(BaseSettings):
     loop_seconds: float = 0.05
     discover_seconds: float = 15.0
     # Pause between series during events-first discovery so we do not burst
-    # GET /events for KXBTC15M then KXETH15M in a tight loop.
+    # Pause between series if more than one is configured.
     discover_series_delay: float = 0.4
     tob_heartbeat_ms: int = 100
     last_seconds: int = PAPER_V2_LAST_SECONDS
@@ -121,7 +123,7 @@ class Settings(BaseSettings):
     max_windows: int = MAX_CONCURRENT_WINDOWS
     # Soft preference: flatten unpaired after this many seconds (not a Risk Desk kill).
     max_unpaired_age_seconds: int = DEFAULT_MAX_UNPAIRED_AGE_SECONDS
-    # Soft preference: flatten / refuse growth above this notional (hard kill stays $30).
+    # Soft preference: flatten / refuse growth above this notional (hard kill stays 3%).
     soft_onesided: Decimal = DEFAULT_SOFT_ONESIDED
     # Soft preference: skip new ENTRY unless bid_sum ≤ 1 − min_edge (Regime B).
     only_quote_underround: bool = False
@@ -162,6 +164,13 @@ class Settings(BaseSettings):
             raise ValueError("max_unpaired_age_seconds must be >= 0")
         if self.soft_onesided < 0:
             raise ValueError("soft_onesided must be >= 0")
+        if self.daily_loss_limit <= self.clip and (
+            self.soft_onesided <= 0 or self.max_unpaired_age_seconds <= 0
+        ):
+            raise ValueError(
+                "daily kill <= clip requires soft_onesided > 0 and "
+                "max_unpaired_age_seconds > 0 (soft abort is mandatory)"
+            )
         if self.last_seconds < LAST_SECONDS_NO_RISK:
             raise ValueError(
                 f"last_seconds must be >= {LAST_SECONDS_NO_RISK} (Risk Desk v1 floor)"

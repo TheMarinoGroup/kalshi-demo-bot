@@ -1,11 +1,10 @@
 """Maker-first quoting for 15-minute crypto Up/Down markets.
 
-Default is one-sided: join (or optionally improve) the bid on a single
-outcome. After any fill, the only quote is the completing side. Flatten
-if unpaired notional is above ``soft_onesided`` ($10), age exceeds
-``max_unpaired_age_seconds`` (45s), or the completing quote cannot be
-posted. New one-sided clips are skipped while another window is unpaired.
-Two-sided mode exists but is not the paper-v2-tight path.
+Paper-v2 Option B is one-sided and is driven by ``classify_paper_v2``:
+quote one clip while flat; after any fill/touch, complete the other side
+only; flatten on soft onesided ($10), unpaired age (45s), or if the
+completing quote cannot post; never open a new clip while unpaired exists.
+Two-sided mode is a legacy/test path only (``quote_mode=two_sided``).
 """
 
 from __future__ import annotations
@@ -14,9 +13,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
 
-from kalshi_pbot.config import Settings
+from kalshi_pbot.config import CLIP_MAX, CLIP_MIN, Settings
 from kalshi_pbot.execution import flatten_intent
-from kalshi_pbot.risk_engine import should_abort_unpaired, unpaired_abort_reason
+from kalshi_pbot.strategy.paper_v2 import PaperV2State, classify_paper_v2
 from kalshi_pbot.types import (
     IntentKind,
     Liquidity,
@@ -43,10 +42,16 @@ def quantize_price(price: Decimal, tick: Decimal = TICK) -> Decimal:
 
 
 def clip_count(clip_dollars: Decimal, price: Decimal) -> Decimal:
+    """Size a clip so notional stays inside the $10–$30 band when possible."""
     if price <= 0:
         return Decimal("0")
-    raw = (clip_dollars / price).to_integral_value(rounding=ROUND_DOWN)
-    return max(Decimal("1"), raw)
+    want = (clip_dollars / price).to_integral_value(rounding=ROUND_DOWN)
+    need = (CLIP_MIN / price).to_integral_value(rounding=ROUND_CEILING)
+    cap = (CLIP_MAX / price).to_integral_value(rounding=ROUND_DOWN)
+    count = max(need, want, Decimal("1"))
+    if cap > 0:
+        count = min(count, cap)
+    return count
 
 
 def paired_clip_count(
@@ -106,14 +111,6 @@ def is_underround(book: OrderBook, min_edge: Decimal) -> bool:
     return bid_sum is not None and bid_sum <= Decimal("1") - min_edge
 
 
-def _foreign_unpaired(snapshot: PortfolioSnapshot, ticker: str) -> bool:
-    """Unpaired inventory on a different window/ticker than the one we are quoting."""
-    for other_ticker, pos in snapshot.positions.items():
-        if other_ticker != ticker and pos.unpaired_qty > 0:
-            return True
-    return False
-
-
 @dataclass
 class MakerStrategy:
     settings: Settings
@@ -129,11 +126,39 @@ class MakerStrategy:
         now = now or datetime.now(UTC)
         pos = _position(snapshot, market.ticker)
         unpaired = pos.unpaired_outcome if pos else None
-        if unpaired is not None and pos is not None:
-            return self._manage_unpaired(market, book, pos, unpaired, now)
 
-        # Soft: never open a new clip while another window is already unpaired.
-        if _foreign_unpaired(snapshot, market.ticker):
+        complete = None
+        can_complete = True
+        if unpaired is not None and pos is not None:
+            completing = Outcome.NO if unpaired is Outcome.YES else Outcome.YES
+            complete = self._quote_side(
+                market,
+                book,
+                completing,
+                kind=IntentKind.COMPLETE_PAIR,
+                reason="complete_incomplete_pair",
+                improve_ticks=self.settings.improve_ticks,
+            )
+            can_complete = complete is not None
+
+        decision = classify_paper_v2(
+            snapshot,
+            market.ticker,
+            self.settings,
+            now=now,
+            close_time=market.close_time,
+            can_complete=can_complete,
+        )
+        if decision.state is PaperV2State.HARD_KILL:
+            return []
+        if decision.flatten and pos is not None and unpaired is not None:
+            flatten = self._flatten_unpaired(
+                market, book, pos, unpaired, reason=decision.reason
+            )
+            return [flatten] if flatten else []
+        if decision.complete_other_side:
+            return [complete] if complete else []
+        if not decision.allow_new_onesided:
             return []
 
         if self.settings.only_quote_underround and not is_underround(book, self.settings.min_edge):
@@ -175,36 +200,6 @@ class MakerStrategy:
             market, book, side, kind=IntentKind.ENTRY, reason="one_sided_mm"
         )
         return [intent] if intent else []
-
-    def _manage_unpaired(
-        self,
-        market: MarketWindow,
-        book: OrderBook,
-        pos: Position,
-        unpaired: Outcome,
-        now: datetime,
-    ) -> list[QuoteIntent]:
-        completing = Outcome.NO if unpaired is Outcome.YES else Outcome.YES
-        abort = should_abort_unpaired(pos, self.settings, now)
-        complete = self._quote_side(
-            market,
-            book,
-            completing,
-            kind=IntentKind.COMPLETE_PAIR,
-            reason="complete_incomplete_pair",
-            improve_ticks=self.settings.improve_ticks,
-        )
-        if complete is not None and not abort:
-            return [complete]
-        reason = (
-            unpaired_abort_reason(pos, self.settings, now)
-            if abort
-            else "unpaired_cannot_complete"
-        )
-        flatten = self._flatten_unpaired(market, book, pos, unpaired, reason=reason)
-        if flatten is not None:
-            return [flatten]
-        return [complete] if complete else []
 
     def _flatten_unpaired(
         self,
