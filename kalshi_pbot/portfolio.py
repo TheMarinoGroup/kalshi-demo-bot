@@ -161,6 +161,40 @@ class Portfolio:
             unpaired=str(pos.unpaired_qty),
         )
 
+    def projected_open_after_fill(self, fill: Fill) -> Decimal:
+        """Gross open (cost + reserved) if this fill is applied, including pairing."""
+        costs = {ticker: pos.cost_basis() for ticker, pos in self.positions.items()}
+        yes_qty = fill.count if fill.outcome is Outcome.YES else Decimal("0")
+        no_qty = fill.count if fill.outcome is Outcome.NO else Decimal("0")
+        yes_cost = fill.price * fill.count if fill.outcome is Outcome.YES else Decimal("0")
+        no_cost = fill.price * fill.count if fill.outcome is Outcome.NO else Decimal("0")
+        pos = self.positions.get(fill.market_ticker)
+        if pos is not None:
+            yes_qty += pos.yes_qty
+            no_qty += pos.no_qty
+            yes_cost += pos.yes_cost
+            no_cost += pos.no_cost
+        paired = min(yes_qty, no_qty)
+        if paired > 0:
+            yes_px = (yes_cost / yes_qty) if yes_qty else Decimal("0")
+            no_px = (no_cost / no_qty) if no_qty else Decimal("0")
+            yes_qty -= paired
+            no_qty -= paired
+            yes_cost -= yes_px * paired
+            no_cost -= no_px * paired
+            if yes_qty <= 0:
+                yes_qty = yes_cost = Decimal("0")
+            if no_qty <= 0:
+                no_qty = no_cost = Decimal("0")
+        costs[fill.market_ticker] = yes_cost + no_cost
+        cost = sum(costs.values(), Decimal("0"))
+        reserved = Decimal("0")
+        for oid, order in self.resting.items():
+            remaining = order.remaining - fill.count if oid == fill.order_id else order.remaining
+            if remaining > 0:
+                reserved += order.price * remaining
+        return reserved + cost
+
     def apply_settlement(
         self,
         ticker: str,

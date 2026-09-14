@@ -25,6 +25,8 @@ from kalshi_pbot.types import (
     RiskDecision,
 )
 
+_INVENTORY_KILL_CODES = frozenset({"open", "one-sided"})
+
 
 def _now(ts: datetime | None) -> datetime:
     if ts is None:
@@ -137,6 +139,40 @@ def unpaired_abort_reason(
     return "unpaired_age_abort"
 
 
+def increases_open_risk(intent: QuoteIntent) -> bool:
+    """True when registering this intent would add gross open (cost or reserved)."""
+    return not (
+        intent.reduce_only
+        or intent.sell
+        or intent.kind in {IntentKind.FLATTEN, IntentKind.CANCEL}
+    )
+
+
+def projected_open_notional(snapshot: PortfolioSnapshot, intent: QuoteIntent) -> Decimal:
+    """Gross open after this intent is registered (reserved + cost)."""
+    if not increases_open_risk(intent):
+        return snapshot.open_notional
+    return snapshot.open_notional + intent.notional
+
+
+def over_max_open(snapshot: PortfolioSnapshot, settings: Settings) -> bool:
+    """True when gross open is strictly above the locked cap (overshoot)."""
+    return snapshot.open_notional > settings.max_open_notional
+
+
+def should_abort_open(
+    snapshot: PortfolioSnapshot,
+    settings: Settings,
+) -> bool:
+    """Soft flatten when open overshoots the cap. Does not trip the hard kill."""
+    return over_max_open(snapshot, settings)
+
+
+def inventory_kill_resettable(reason: str) -> bool:
+    """Open / one-sided kills may be cleared in paper soak; daily loss may not."""
+    return classify_kill(reason) in _INVENTORY_KILL_CODES
+
+
 def classify_kill(reason: str) -> str:
     """Map a kill-switch detail string to HUD codes: loss / open / one-sided / manual."""
     text = (reason or "").strip().lower()
@@ -178,20 +214,41 @@ class RiskEngine:
             return True
         return False
 
+    def latch_inventory_kills(self) -> bool:
+        """Paper-tape flattens open/onesided overshoot without freezing the soak."""
+        return not self.settings.paper_tape
+
     def maybe_trip_limits(self, snapshot: PortfolioSnapshot) -> bool:
-        """Latch kill on daily loss, or open/one-sided at or above the locked cap."""
+        """Latch daily loss always. Open/onesided latch only outside paper-tape."""
         tripped = self.maybe_trip_daily(snapshot)
         if snapshot.open_notional >= self.settings.max_open_notional:
-            self.trip(
-                f"open_notional {snapshot.open_notional} >= {self.settings.max_open_notional}"
-            )
-            return True
+            if self.latch_inventory_kills():
+                self.trip(
+                    f"open_notional {snapshot.open_notional} >= {self.settings.max_open_notional}"
+                )
+                return True
         if snapshot.unpaired_notional >= self.settings.max_onesided:
-            self.trip(
-                f"onesided {snapshot.unpaired_notional} >= {self.settings.max_onesided}"
-            )
-            return True
+            if self.latch_inventory_kills():
+                self.trip(
+                    f"onesided {snapshot.unpaired_notional} >= {self.settings.max_onesided}"
+                )
+                return True
         return tripped or self.kill_active
+
+    def maybe_reset_paper_kill(self, snapshot: PortfolioSnapshot) -> bool:
+        """Clear an open/onesided latch after flatten. Never clears daily loss."""
+        if not self.settings.paper_auto_reset_kill or not self.kill_active:
+            return False
+        if self._latched_daily or classify_kill(self.kill_reason) == "loss":
+            return False
+        if not inventory_kill_resettable(self.kill_reason):
+            return False
+        if snapshot.open_notional > self.settings.max_open_notional:
+            return False
+        if snapshot.unpaired_notional >= self.settings.max_onesided:
+            return False
+        self.reset_kill()
+        return True
 
     def evaluate(
         self,
@@ -265,15 +322,20 @@ class RiskEngine:
                 f"{len(projected_windows)} > max {self.settings.max_windows} windows",
             )
 
-        projected_open = snapshot.open_notional
-        if not flatten_like:
-            projected_open += intent.notional
-        if projected_open > self.settings.max_open_notional:
-            return RiskDecision(
-                False,
-                RejectReason.OPEN_NOTIONAL,
-                f"open {projected_open} > max {self.settings.max_open_notional}",
-            )
+        if increases_open_risk(intent):
+            if snapshot.open_notional >= self.settings.max_open_notional:
+                return RiskDecision(
+                    False,
+                    RejectReason.OPEN_NOTIONAL,
+                    f"open {snapshot.open_notional} >= max {self.settings.max_open_notional}",
+                )
+            projected_open = projected_open_notional(snapshot, intent)
+            if projected_open > self.settings.max_open_notional:
+                return RiskDecision(
+                    False,
+                    RejectReason.OPEN_NOTIONAL,
+                    f"open {projected_open} > max {self.settings.max_open_notional}",
+                )
 
         if not flatten_like:
             onesided = self._projected_onesided(intent, snapshot)

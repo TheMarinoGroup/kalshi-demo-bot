@@ -13,6 +13,7 @@ from kalshi_pbot.config import Settings
 from kalshi_pbot.kalshi_client import KalshiRestClient
 from kalshi_pbot.paper_matcher import PaperMatcher
 from kalshi_pbot.portfolio import Portfolio
+from kalshi_pbot.risk_engine import increases_open_risk, projected_open_notional
 from kalshi_pbot.tape import JsonlTape
 from kalshi_pbot.types import (
     CancelIntent,
@@ -76,6 +77,25 @@ class ExecutionEngine:
         return self.settings.live_submit and self.rest is not None
 
     def submit(self, intent: QuoteIntent, book: OrderBook | None = None) -> dict[str, object]:
+        if increases_open_risk(intent):
+            snap = self.portfolio.snapshot()
+            projected = projected_open_notional(snap, intent)
+            if projected > self.settings.max_open_notional:
+                log.info(
+                    "submit_reject_open_notional",
+                    ticker=intent.market_ticker,
+                    outcome=intent.outcome.value,
+                    kind=intent.kind.value,
+                    projected=str(projected),
+                    max_open=str(self.settings.max_open_notional),
+                )
+                return {
+                    "ok": False,
+                    "dry_run": True,
+                    "rejected": "open_notional",
+                    "projected": str(projected),
+                }
+
         body = build_order_body(intent)
         self.portfolio.orders_submitted += 1
 
@@ -85,18 +105,20 @@ class ExecutionEngine:
         oid = str(body["client_order_id"])
         paper_id = f"paper-{oid}" if self.settings.paper_tape else f"dry-{oid}"
         self.dry_run_orders.append(body)
-        self.portfolio.upsert_resting(
-            RestingOrder(
-                order_id=paper_id,
-                client_order_id=oid,
-                market_ticker=intent.market_ticker,
-                event_ticker=intent.event_ticker,
-                outcome=intent.outcome,
-                price=intent.price,
-                remaining=intent.count,
-                post_only=bool(body["post_only"]),
+        # Flatten/reduce-only exits must not count as reserved open (they never add risk).
+        if increases_open_risk(intent):
+            self.portfolio.upsert_resting(
+                RestingOrder(
+                    order_id=paper_id,
+                    client_order_id=oid,
+                    market_ticker=intent.market_ticker,
+                    event_ticker=intent.event_ticker,
+                    outcome=intent.outcome,
+                    price=intent.price,
+                    remaining=intent.count,
+                    post_only=bool(body["post_only"]),
+                )
             )
-        )
         if self.settings.paper_tape and intent.liquidity is Liquidity.MAKER:
             placed = replace(intent, client_order_id=paper_id)
             now_ms = int(time.time() * 1000)

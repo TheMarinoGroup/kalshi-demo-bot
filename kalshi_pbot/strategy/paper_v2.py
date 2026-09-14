@@ -21,6 +21,7 @@ from kalshi_pbot.config import Settings
 from kalshi_pbot.risk_engine import (
     has_unpaired_inventory,
     in_last_seconds,
+    over_max_open,
     should_abort_unpaired,
     unpaired_abort_reason,
 )
@@ -35,7 +36,7 @@ class PaperV2State(StrEnum):
     SOFT_ABORT = "soft_abort"  # flatten (soft $10 / age 45s / cannot complete)
     BLOCK_NEW = "block_new"  # unpaired elsewhere — no new onesided
     LAST_SECONDS = "last_seconds"  # no new risk; flatten only
-    HARD_KILL = "hard_kill"  # Risk Desk kill (open / onesided / daily)
+    HARD_KILL = "hard_kill"  # Risk Desk daily-loss (or non-paper inventory) latch
 
 
 @dataclass(frozen=True)
@@ -78,12 +79,12 @@ def classify_paper_v2(
     """Classify the next paper-v2 action for one ticker."""
     if snapshot.kill_active:
         return PaperV2Decision(PaperV2State.HARD_KILL, snapshot.kill_reason or "kill")
-    if _unpaired_usd(snapshot) >= settings.max_onesided:
-        return PaperV2Decision(PaperV2State.HARD_KILL, "onesided_hard")
     if snapshot.daily_pnl <= -settings.daily_loss_limit:
         return PaperV2Decision(PaperV2State.HARD_KILL, "daily_loss")
-    if snapshot.open_notional >= settings.max_open_notional:
-        return PaperV2Decision(PaperV2State.HARD_KILL, "open_notional")
+    if over_max_open(snapshot, settings):
+        return PaperV2Decision(PaperV2State.SOFT_ABORT, "open_notional_abort")
+    if _unpaired_usd(snapshot) >= settings.max_onesided:
+        return PaperV2Decision(PaperV2State.SOFT_ABORT, "onesided_hard_abort")
 
     pos = _local_position(snapshot, ticker)
     local_unpaired = pos is not None and pos.unpaired_qty > 0

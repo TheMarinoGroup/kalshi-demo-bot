@@ -542,6 +542,14 @@ class KalshiWebSocket:
                         await result
         except asyncio.CancelledError:
             raise
+        except websockets.exceptions.ConnectionClosed as exc:
+            rcvd = getattr(exc, "rcvd", None)
+            log.warning(
+                "ws_disconnected",
+                code=getattr(rcvd, "code", None),
+                reason=str(exc),
+                error_type=type(exc).__name__,
+            )
         except Exception:
             log.exception("ws_read_error")
 
@@ -556,6 +564,9 @@ class KalshiWebSocket:
                     await self._task
                 if not self._stop.is_set():
                     log.warning("ws_reader_stopped")
+                    # Drop a zombie socket so the next connect() cannot no-op.
+                    async with self._lock:
+                        await self._detach_unlocked()
             except asyncio.CancelledError:
                 if self._stop.is_set():
                     raise

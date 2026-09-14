@@ -31,13 +31,21 @@ from kalshi_pbot.risk_engine import (
     RiskEngine,
     recycle_ready,
     seconds_since_close,
+    should_abort_open,
     should_abort_unpaired,
     unpaired_abort_reason,
 )
 from kalshi_pbot.strategy.maker import MakerStrategy
 from kalshi_pbot.strategy.pair_arb import PairArbStrategy
 from kalshi_pbot.tape import JsonlTape
-from kalshi_pbot.types import IntentKind, MarketWindow, OrderBook, Outcome, QuoteIntent
+from kalshi_pbot.types import (
+    IntentKind,
+    MarketWindow,
+    OrderBook,
+    Outcome,
+    QuoteIntent,
+    RejectReason,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -111,6 +119,7 @@ class PaperBot:
             improve_ticks=self.settings.improve_ticks,
             only_quote_underround=self.settings.only_quote_underround,
             clip=str(self.settings.clip),
+            paper_auto_reset_kill=self.settings.paper_auto_reset_kill,
             settle_recycle_s=self.settings.effective_settle_recycle_seconds,
             settle_rare_tail=self.settings.settle_rare_tail,
             hud=self.settings.hud,
@@ -126,12 +135,12 @@ class PaperBot:
 
         hud_task: asyncio.Task[None] | None = None
         if self.settings.hud:
-            from kalshi_pbot.hud_server import HudHub, serve_hud
+            from kalshi_pbot.hud_server import HudHub
 
             self.hud_hub = HudHub()
             self.hud_hub.publish(build_snapshot(self, self.mid_history))
             hud_task = asyncio.create_task(
-                serve_hud(self, self.hud_hub, self.mid_history), name="kalshi-hud"
+                self._run_hud(self.hud_hub, self.mid_history), name="kalshi-hud"
             )
 
         ws = getattr(self.client, "ws", None)
@@ -143,15 +152,20 @@ class PaperBot:
             ws_forever = asyncio.create_task(ws.run_forever(), name="kalshi-ws-forever")
 
         while not self._stop.is_set():
-            now = datetime.now(UTC)
-            if now.timestamp() - last_discover >= self.settings.discover_seconds:
-                prev = set(self.universe.markets)
-                self.universe.refresh(now=now)
-                self.universe.hydrate_books(self.books)
-                if set(self.universe.markets) != prev and ws is not None:
-                    await self._resubscribe()
-                last_discover = now.timestamp()
-            self.step(now=now)
+            try:
+                now = datetime.now(UTC)
+                if now.timestamp() - last_discover >= self.settings.discover_seconds:
+                    prev = set(self.universe.markets)
+                    self.universe.refresh(now=now)
+                    self.universe.hydrate_books(self.books)
+                    if set(self.universe.markets) != prev and ws is not None:
+                        await self._resubscribe()
+                    last_discover = now.timestamp()
+                self.step(now=now)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("step_failed")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.settings.loop_seconds)
             except TimeoutError:
@@ -169,6 +183,26 @@ class PaperBot:
                 pass
         self.client.close()
         log.info("bot_stop")
+
+    async def _run_hud(self, hub, history) -> None:
+        """Serve the desk HUD; restart on crash so :8080 death does not end the soak."""
+        from kalshi_pbot.hud_server import serve_hud
+
+        delay = 2.0
+        while not self._stop.is_set():
+            try:
+                await serve_hud(self, hub, history)
+                if self._stop.is_set():
+                    return
+                log.warning("hud_server_exited", delay=delay)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("hud_server_crashed", delay=delay)
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=delay)
+            except TimeoutError:
+                continue
 
     async def _subscribe_channels(self) -> None:
         ws = getattr(self.client, "ws", None)
@@ -315,8 +349,7 @@ class PaperBot:
         snapshot = self.portfolio.snapshot(books)
         self.risk.maybe_trip_limits(snapshot)
         if self.risk.kill_active:
-            self.portfolio.kill_active = True
-            self.portfolio.kill_reason = self.risk.kill_reason
+            self._sync_kill_flags()
             self.execution.cancel_all()
             snapshot = self.portfolio.snapshot(books)
 
@@ -340,6 +373,28 @@ class PaperBot:
             if flat:
                 submitted.append(flat)
             snapshot = self.portfolio.snapshot(books)
+
+        if should_abort_open(snapshot, self.settings):
+            log.warning(
+                "open_notional_overshoot",
+                open=str(snapshot.open_notional),
+                max_open=str(self.settings.max_open_notional),
+                kill=self.risk.kill_active,
+            )
+            contained = self._contain_open_notional(snapshot, now, books)
+            submitted.extend(contained)
+            snapshot = self.portfolio.snapshot(books)
+            for intent in contained:
+                aged_tickers.add(intent.market_ticker)
+
+        if self.risk.kill_active and self.risk.maybe_reset_paper_kill(snapshot):
+            log.warning(
+                "paper_auto_reset_kill",
+                previous=self.portfolio.kill_reason,
+                open=str(snapshot.open_notional),
+            )
+            self.portfolio.kill_active = False
+            self.portfolio.kill_reason = ""
 
         if self.risk.kill_active:
             emit_metrics(compute_metrics(self.settings, self.portfolio, snapshot))
@@ -372,8 +427,21 @@ class PaperBot:
                         outcome=intent.outcome.value,
                         kind=intent.kind.value,
                     )
+                    if (
+                        decision.reason is RejectReason.OPEN_NOTIONAL
+                        and intent.kind is IntentKind.COMPLETE_PAIR
+                    ):
+                        flat = self._flatten_window(
+                            market, snapshot, now, reason="open_notional_abort"
+                        )
+                        if flat:
+                            submitted.append(flat)
+                            aged_tickers.add(market.ticker)
+                        snapshot = self.portfolio.snapshot(books)
                     continue
-                self.execution.submit(intent, book=book)
+                result = self.execution.submit(intent, book=book)
+                if result.get("rejected"):
+                    continue
                 submitted.append(intent)
                 snapshot = self.portfolio.snapshot(books)
 
@@ -445,6 +513,30 @@ class PaperBot:
         fills = self.matcher.drain(now_ms)
         for paper in fills:
             fill = self.matcher.to_portfolio_fill(paper)
+            projected = self.portfolio.projected_open_after_fill(fill)
+            if projected > self.settings.max_open_notional:
+                log.info(
+                    "paper_fill_rejected_open_cap",
+                    order_id=paper.order_id,
+                    ticker=paper.market_ticker,
+                    projected=str(projected),
+                    max_open=str(self.settings.max_open_notional),
+                    notional=str(paper.price * paper.count),
+                )
+                self.matcher.cancel(paper.order_id, reason="open_notional_cap")
+                self.portfolio.drop_resting(paper.order_id)
+                if self.tape:
+                    self.tape.write(
+                        "paper_fill_rejected",
+                        order_id=paper.order_id,
+                        ticker=paper.market_ticker,
+                        outcome=paper.outcome.value,
+                        price=paper.price,
+                        count=paper.count,
+                        projected=projected,
+                        reason="open_notional_cap",
+                    )
+                continue
             self.portfolio.apply_fill(fill)
             if self.tape:
                 self.tape.write(
@@ -515,6 +607,25 @@ class PaperBot:
             if pair_quotes:
                 return pair_quotes
         return self.maker.evaluate(market, book, snapshot, now=now)
+
+    def _sync_kill_flags(self) -> None:
+        self.portfolio.kill_active = self.risk.kill_active
+        self.portfolio.kill_reason = self.risk.kill_reason if self.risk.kill_active else ""
+
+    def _contain_open_notional(self, snapshot, now: datetime, books: dict) -> list[QuoteIntent]:
+        """Cancel working buys and flatten unpaired until gross open is <= max_open."""
+        submitted: list[QuoteIntent] = []
+        self.execution.cancel_all()
+        snapshot = self.portfolio.snapshot(books)
+        for market in list(self.universe.markets.values()):
+            pos = snapshot.positions.get(market.ticker)
+            if pos is None or pos.unpaired_qty <= 0:
+                continue
+            flat = self._flatten_window(market, snapshot, now, reason="open_notional_abort")
+            if flat:
+                submitted.append(flat)
+            snapshot = self.portfolio.snapshot(books)
+        return submitted
 
     def _aged_unpaired_markets(self, snapshot, now: datetime) -> list[MarketWindow]:
         aged: list[MarketWindow] = []

@@ -123,7 +123,7 @@ def test_last_seconds_blocks_new_and_flatten_only(now) -> None:
     assert decision.flatten is True
 
 
-def test_hard_kill_onesided_at_fifteen(now) -> None:
+def test_hard_kill_onesided_flattens_without_latch(now) -> None:
     settings = option_b()
     pos = yes_position(qty="30", px="0.50", unpaired_since=now)  # $15
     snap = empty_snapshot(
@@ -133,8 +133,9 @@ def test_hard_kill_onesided_at_fifteen(now) -> None:
         open_notional=Decimal("15"),
     )
     decision = classify_paper_v2(snap, pos.market_ticker, settings, now=now)
-    assert decision.state is PaperV2State.HARD_KILL
-    assert decision.reason == "onesided_hard"
+    assert decision.state is PaperV2State.SOFT_ABORT
+    assert decision.reason == "onesided_hard_abort"
+    assert decision.flatten is True
 
 
 def test_hard_kill_daily_at_ten(now) -> None:
@@ -145,12 +146,21 @@ def test_hard_kill_daily_at_ten(now) -> None:
     assert decision.reason == "daily_loss"
 
 
-def test_hard_kill_open_at_twenty_five(now) -> None:
+def test_open_overshoot_is_soft_abort_not_kill(now) -> None:
     settings = option_b()
-    snap = empty_snapshot(settings, open_notional=Decimal("25"))
+    snap = empty_snapshot(settings, open_notional=Decimal("33.327"))
     decision = classify_paper_v2(snap, "KXBTC15M-MOCK", settings, now=now)
-    assert decision.state is PaperV2State.HARD_KILL
-    assert decision.reason == "open_notional"
+    assert decision.state is PaperV2State.SOFT_ABORT
+    assert decision.reason == "open_notional_abort"
+    assert decision.flatten is True
+    exact = classify_paper_v2(
+        empty_snapshot(settings, open_notional=Decimal("25")),
+        "KXBTC15M-MOCK",
+        settings,
+        now=now,
+    )
+    assert exact.state is not PaperV2State.HARD_KILL
+    assert exact.reason != "open_notional_abort"
 
 
 def test_maker_follows_complete_then_soft_abort(market, now) -> None:

@@ -125,6 +125,10 @@ class Settings(BaseSettings):
     max_unpaired_age_seconds: int = DEFAULT_MAX_UNPAIRED_AGE_SECONDS
     # Soft preference: flatten / refuse growth above this notional (hard kill stays 3%).
     soft_onesided: Decimal = DEFAULT_SOFT_ONESIDED
+    # Paper-tape soak: after flatten, clear an open/onesided kill latch so overnight
+    # continues. Never clears a daily-loss kill. Default off — paper-tape already
+    # refuses to latch open/onesided kills; this is an extra escape hatch.
+    paper_auto_reset_kill: bool = False
     # Soft preference: skip new ENTRY unless bid_sum ≤ 1 − min_edge (Regime B).
     only_quote_underround: bool = False
     cfb_5hz: bool = False

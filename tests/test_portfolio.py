@@ -102,6 +102,85 @@ def test_unpaired_since_set_on_first_fill_and_cleared_on_pair(settings: Settings
     assert port.positions["T"].unpaired_since is None
 
 
+def test_projected_open_after_orphan_fill_counts_full_notional(settings: Settings) -> None:
+    port = Portfolio(settings)
+    port.apply_fill(
+        Fill(
+            fill_id="1",
+            order_id="a",
+            market_ticker="T",
+            event_ticker="E",
+            outcome=Outcome.YES,
+            price=Decimal("0.50"),
+            count=Decimal("40"),
+            fee=Decimal("0"),
+            is_taker=False,
+            ts_ms=1,
+        )
+    )
+    orphan = Fill(
+        fill_id="2",
+        order_id="missing",
+        market_ticker="T",
+        event_ticker="E",
+        outcome=Outcome.YES,
+        price=Decimal("0.50"),
+        count=Decimal("40"),
+        fee=Decimal("0"),
+        is_taker=False,
+        ts_ms=2,
+    )
+    assert port.snapshot().open_notional == Decimal("20")
+    assert port.projected_open_after_fill(orphan) == Decimal("40")
+
+
+def test_projected_open_after_resting_fill_pairs_down(settings: Settings) -> None:
+    from kalshi_pbot.types import RestingOrder
+
+    port = Portfolio(settings)
+    port.apply_fill(
+        Fill(
+            fill_id="1",
+            order_id="a",
+            market_ticker="T",
+            event_ticker="E",
+            outcome=Outcome.YES,
+            price=Decimal("0.30"),
+            count=Decimal("20"),
+            fee=Decimal("0"),
+            is_taker=False,
+            ts_ms=1,
+        )
+    )
+    port.upsert_resting(
+        RestingOrder(
+            order_id="no-1",
+            client_order_id="no-1",
+            market_ticker="T",
+            event_ticker="E",
+            outcome=Outcome.NO,
+            price=Decimal("0.40"),
+            remaining=Decimal("20"),
+        )
+    )
+    before = port.snapshot().open_notional
+    assert before == Decimal("14")  # $6 cost + $8 reserved
+    fill = Fill(
+        fill_id="2",
+        order_id="no-1",
+        market_ticker="T",
+        event_ticker="E",
+        outcome=Outcome.NO,
+        price=Decimal("0.40"),
+        count=Decimal("20"),
+        fee=Decimal("0"),
+        is_taker=False,
+        ts_ms=2,
+    )
+    # Pairing realizes both legs; reserved consumed.
+    assert port.projected_open_after_fill(fill) == Decimal("0")
+
+
 def test_sell_yes_maps_to_ask() -> None:
     from kalshi_pbot.execution import build_order_body, flatten_intent
     from kalshi_pbot.types import Outcome

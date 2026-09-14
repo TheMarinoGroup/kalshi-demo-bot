@@ -8,7 +8,15 @@ from kalshi_pbot.config import Settings
 from kalshi_pbot.execution import ExecutionEngine
 from kalshi_pbot.kalshi_client import KalshiRestClient
 from kalshi_pbot.portfolio import Portfolio
-from kalshi_pbot.types import Liquidity, OrderBook, Outcome, PriceLevel, QuoteIntent
+from kalshi_pbot.types import (
+    Fill,
+    IntentKind,
+    Liquidity,
+    OrderBook,
+    Outcome,
+    PriceLevel,
+    QuoteIntent,
+)
 
 
 class ForbiddenRest:
@@ -52,3 +60,37 @@ def test_create_order_raises_on_data_client() -> None:
     client = KalshiRestClient(settings, purpose="data")
     with pytest.raises(RuntimeError, match="demo order REST"):
         client.create_order({"ticker": "X"})
+
+
+def test_submit_rejects_when_projected_open_exceeds_cap() -> None:
+    settings = Settings(paper_tape=True, dry_run=True, mock=True)
+    port = Portfolio(settings)
+    port.apply_fill(
+        Fill(
+            fill_id="1",
+            order_id="a",
+            market_ticker="KXBTC15M-T",
+            event_ticker="KXBTC15M-T",
+            outcome=Outcome.YES,
+            price=Decimal("0.50"),
+            count=Decimal("40"),
+            fee=Decimal("0"),
+            is_taker=False,
+            ts_ms=1,
+        )
+    )
+    engine = ExecutionEngine(settings, port, rest=ForbiddenRest())  # type: ignore[arg-type]
+    fat = QuoteIntent(
+        market_ticker="KXBTC15M-T",
+        event_ticker="KXBTC15M-T",
+        outcome=Outcome.NO,
+        price=Decimal("0.70"),
+        count=Decimal("40"),
+        liquidity=Liquidity.MAKER,
+        kind=IntentKind.COMPLETE_PAIR,
+    )
+    assert fat.notional + Decimal("20") > settings.max_open_notional
+    result = engine.submit(fat)
+    assert result["rejected"] == "open_notional"
+    assert engine.matcher.orders == {}
+    assert port.snapshot().open_notional == Decimal("20")

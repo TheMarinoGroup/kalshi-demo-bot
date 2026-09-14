@@ -41,6 +41,24 @@ def quantize_price(price: Decimal, tick: Decimal = TICK) -> Decimal:
     return stepped
 
 
+def count_within_open_cap(
+    count: Decimal,
+    price: Decimal,
+    open_notional: Decimal,
+    max_open: Decimal,
+) -> Decimal:
+    """Shrink a buy so cost+reserved would not exceed max_open."""
+    if count <= 0 or price <= 0:
+        return Decimal("0")
+    remaining = max_open - open_notional
+    if remaining <= 0:
+        return Decimal("0")
+    cap = (remaining / price).to_integral_value(rounding=ROUND_DOWN)
+    if cap <= 0:
+        return Decimal("0")
+    return min(count, cap)
+
+
 def clip_count(clip_dollars: Decimal, price: Decimal) -> Decimal:
     """Size a clip so notional stays inside the $10–$30 band when possible."""
     if price <= 0:
@@ -138,6 +156,8 @@ class MakerStrategy:
                 kind=IntentKind.COMPLETE_PAIR,
                 reason="complete_incomplete_pair",
                 improve_ticks=self.settings.improve_ticks,
+                count=pos.unpaired_qty,
+                snapshot=snapshot,
             )
             can_complete = complete is not None
 
@@ -168,7 +188,12 @@ class MakerStrategy:
             quotes = []
             for outcome in (Outcome.YES, Outcome.NO):
                 intent = self._quote_side(
-                    market, book, outcome, kind=IntentKind.ENTRY, reason="two_sided_mm"
+                    market,
+                    book,
+                    outcome,
+                    kind=IntentKind.ENTRY,
+                    reason="two_sided_mm",
+                    snapshot=snapshot,
                 )
                 if intent:
                     quotes.append(intent)
@@ -188,7 +213,12 @@ class MakerStrategy:
         if yes_spread is None and no_spread is None:
             # Empty book: seed a yes bid at one tick.
             intent = self._quote_side(
-                market, book, Outcome.YES, kind=IntentKind.ENTRY, reason="seed_empty_book"
+                market,
+                book,
+                Outcome.YES,
+                kind=IntentKind.ENTRY,
+                reason="seed_empty_book",
+                snapshot=snapshot,
             )
             return [intent] if intent else []
 
@@ -197,7 +227,7 @@ class MakerStrategy:
         else:
             side = Outcome.NO
         intent = self._quote_side(
-            market, book, side, kind=IntentKind.ENTRY, reason="one_sided_mm"
+            market, book, side, kind=IntentKind.ENTRY, reason="one_sided_mm", snapshot=snapshot
         )
         return [intent] if intent else []
 
@@ -244,6 +274,8 @@ class MakerStrategy:
         kind: IntentKind,
         reason: str,
         improve_ticks: int | None = None,
+        count: Decimal | None = None,
+        snapshot: PortfolioSnapshot | None = None,
     ) -> QuoteIntent | None:
         if outcome is Outcome.YES:
             best = book.best_yes_bid()
@@ -259,13 +291,27 @@ class MakerStrategy:
         )
         if price is None:
             return None
-        count = clip_count(self.settings.clip, price)
+        raw = count if count is not None else clip_count(self.settings.clip, price)
+        if kind is IntentKind.COMPLETE_PAIR:
+            # Never complete more than one clip of extra gross, even if unpaired qty is large.
+            raw = min(raw, clip_count(self.settings.clip, price))
+        if snapshot is not None:
+            raw = count_within_open_cap(
+                raw,
+                price,
+                snapshot.open_notional,
+                self.settings.max_open_notional,
+            )
+        if raw <= 0:
+            return None
+        if kind is IntentKind.ENTRY and raw * price + Decimal("0.01") < CLIP_MIN:
+            return None
         return QuoteIntent(
             market_ticker=market.ticker,
             event_ticker=market.event_ticker,
             outcome=outcome,
             price=price,
-            count=count,
+            count=raw,
             liquidity=Liquidity.MAKER,
             tif=TimeInForce.GTC,
             post_only=True,

@@ -24,3 +24,14 @@ def test_python_module_cli_help() -> None:
     )
     assert result.returncode == 0
     assert "hud" in result.stdout.lower()
+
+
+def test_watch_hud_bat_restarts_unhealthy_desk() -> None:
+    text = Path("watch-hud.bat").read_text(encoding="ascii")
+    assert "cd /d \"%~dp0\"" in text
+    assert "http://127.0.0.1:8080/api/health" in text
+    assert ":loop" in text
+    assert "hud-watchdog.log" in text
+    assert "restarting" in text
+    after_loop = text[text.index(":loop") :]
+    assert "python -m kalshi_pbot hud" in after_loop

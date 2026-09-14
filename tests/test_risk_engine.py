@@ -113,9 +113,9 @@ def test_onesided_cap_blocks_more_same_side(settings: Settings, now: datetime) -
     more_yes = _intent(price="0.50", count="20", outcome=Outcome.YES)
     decision = engine.evaluate(more_yes, snap, close_time=close, now=now)
     assert decision.allowed is False
-    # At the $30 cap the kill latch trips; reject still blocks growth past cap.
-    assert decision.reason is RejectReason.KILL_SWITCH
-    assert engine.kill_active
+    # At the $30 cap paper-tape does not latch; unpaired-exists still blocks growth.
+    assert decision.reason is RejectReason.UNPAIRED_EXISTS
+    assert not engine.kill_active
 
 
 def test_onesided_cap_is_aggregate_across_windows(settings: Settings, now: datetime) -> None:
@@ -147,7 +147,38 @@ def test_onesided_cap_is_aggregate_across_windows(settings: Settings, now: datet
     assert hard.reason is RejectReason.ONESIDED_CAP
 
 
-def test_open_and_onesided_kill_latch_at_exact_cap(settings: Settings, now: datetime) -> None:
+def test_open_and_onesided_do_not_latch_in_paper_tape(settings: Settings, now: datetime) -> None:
+    close = now + timedelta(minutes=10)
+    open_engine = RiskEngine(settings)
+    at_open = empty_snapshot(settings, open_notional=Decimal("50"))
+    open_engine.maybe_trip_limits(at_open)
+    assert not open_engine.kill_active
+    assert settings.paper_tape is True
+    blocked = open_engine.evaluate(_intent(), at_open, close_time=close, now=now)
+    assert blocked.allowed is False
+    assert blocked.reason is RejectReason.OPEN_NOTIONAL
+    flatten = open_engine.evaluate(
+        _intent(kind=IntentKind.FLATTEN, reduce_only=True),
+        at_open,
+        close_time=close,
+        now=now,
+    )
+    assert flatten.allowed
+
+    side_engine = RiskEngine(settings)
+    at_side = empty_snapshot(settings, unpaired_notional=Decimal("30"))
+    side_engine.maybe_trip_limits(at_side)
+    assert not side_engine.kill_active
+
+
+def test_open_and_onesided_kill_latch_outside_paper_tape(now: datetime) -> None:
+    settings = Settings(
+        bankroll=Decimal("1000"),
+        dry_run=True,
+        mock=True,
+        paper_tape=False,
+        max_windows=2,
+    )
     close = now + timedelta(minutes=10)
     open_engine = RiskEngine(settings)
     at_open = empty_snapshot(settings, open_notional=Decimal("50"))
@@ -163,9 +194,6 @@ def test_open_and_onesided_kill_latch_at_exact_cap(settings: Settings, now: date
     side_engine.maybe_trip_limits(at_side)
     assert side_engine.kill_active
     assert classify_kill(side_engine.kill_reason) == "one-sided"
-    just_under_side = RiskEngine(settings)
-    just_under_side.maybe_trip_limits(empty_snapshot(settings, unpaired_notional=Decimal("29.99")))
-    assert not just_under_side.kill_active
     flatten = open_engine.evaluate(
         _intent(kind=IntentKind.FLATTEN, reduce_only=True),
         at_open,
@@ -175,14 +203,14 @@ def test_open_and_onesided_kill_latch_at_exact_cap(settings: Settings, now: date
     assert flatten.allowed
 
 
-def test_open_breach_trips_kill_code(settings: Settings, now: datetime) -> None:
+def test_open_breach_rejects_without_paper_kill(settings: Settings, now: datetime) -> None:
     engine = RiskEngine(settings)
     close = now + timedelta(minutes=10)
     snap = empty_snapshot(settings, open_notional=Decimal("55"))
     decision = engine.evaluate(_intent(), snap, close_time=close, now=now)
-    assert engine.kill_active
-    assert decision.reason is RejectReason.KILL_SWITCH
-    assert classify_kill(engine.kill_reason) == "open"
+    assert not engine.kill_active
+    assert decision.reason is RejectReason.OPEN_NOTIONAL
+    assert classify_kill("open_notional 55 >= 50") == "open"
 
 
 def test_soft_unpaired_blocks_new_entry_without_kill(settings: Settings, now: datetime) -> None:
@@ -340,3 +368,60 @@ def test_naive_close_time_is_treated_as_utc(settings: Settings) -> None:
     now = datetime(2026, 9, 13, 20, 0, tzinfo=UTC)
     naive_close = datetime(2026, 9, 13, 20, 0, 30)  # 30s left if UTC
     assert in_last_seconds(naive_close, 60, now)
+
+
+def test_complete_pair_cannot_push_open_past_max(now: datetime) -> None:
+    """Cheap YES fill + rich same-count NO complete is the Dig6 33.327 path."""
+    settings = Settings(dry_run=True, mock=True, paper_tape=True)
+    engine = RiskEngine(settings)
+    close = now + timedelta(minutes=10)
+    qty = Decimal("33.327")
+    yes_px = Decimal("0.30")
+    pos = yes_position(qty=str(qty), px=str(yes_px))
+    cost = qty * yes_px
+    snap = empty_snapshot(
+        settings,
+        positions={pos.market_ticker: pos},
+        open_notional=cost,
+        unpaired_notional=cost,
+        window_ids=frozenset({pos.event_ticker}),
+    )
+    complete = _intent(
+        price="0.70",
+        count=str(qty),
+        outcome=Outcome.NO,
+        kind=IntentKind.COMPLETE_PAIR,
+    )
+    projected = cost + complete.notional
+    assert projected > settings.max_open_notional
+    decision = engine.evaluate(complete, snap, close_time=close, now=now)
+    assert decision.allowed is False
+    assert decision.reason is RejectReason.OPEN_NOTIONAL
+    assert not engine.kill_active
+    flatten = engine.evaluate(
+        _intent(kind=IntentKind.FLATTEN, reduce_only=True, count=str(qty), price="0.30"),
+        snap,
+        close_time=close,
+        now=now,
+    )
+    assert flatten.allowed
+
+
+def test_paper_auto_reset_clears_open_kill_not_daily(settings: Settings, now: datetime) -> None:
+    armed = settings.model_copy(update={"paper_auto_reset_kill": True, "paper_tape": False})
+    engine = RiskEngine(armed)
+    over = empty_snapshot(armed, open_notional=Decimal("55"))
+    engine.maybe_trip_limits(over)
+    assert engine.kill_active
+    assert classify_kill(engine.kill_reason) == "open"
+    under = empty_snapshot(armed, open_notional=Decimal("10"))
+    assert engine.maybe_reset_paper_kill(under) is True
+    assert not engine.kill_active
+
+    daily = RiskEngine(armed)
+    loss = empty_snapshot(armed, daily_pnl=Decimal("-21"))
+    daily.maybe_trip_limits(loss)
+    assert daily.kill_active
+    assert classify_kill(daily.kill_reason) == "loss"
+    assert daily.maybe_reset_paper_kill(empty_snapshot(armed)) is False
+    assert daily.kill_active
