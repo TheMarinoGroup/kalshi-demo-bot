@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 from pathlib import Path
 from typing import Any
 
 import structlog
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -48,14 +49,64 @@ class HudHub:
         self.rev += 1
 
 
+def _cors_origins(bot: Any) -> list[str]:
+    port = int(getattr(getattr(bot, "settings", None), "hud_port", 8080) or 8080)
+    return [
+        f"http://127.0.0.1:{port}",
+        f"http://localhost:{port}",
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+    ]
+
+
+def _attach_desk_cookie(bot: Any, response: Response) -> Response:
+    """HttpOnly cookie for same-origin HUD Approve. Never put the token in JSON."""
+    token = str(getattr(bot.settings, "desk_token", "") or "")
+    if token:
+        response.set_cookie(
+            key="desk_token",
+            value=token,
+            httponly=True,
+            samesite="strict",
+            path="/",
+        )
+    return response
+
+
 def create_app(bot: Any, hub: HudHub, history: MidHistory) -> FastAPI:
     app = FastAPI(title="Kalshi Paper Desk", version="0.1.0")
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=_cors_origins(bot),
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type", "X-Desk-Token"],
     )
+
+    @app.middleware("http")
+    async def desk_token_cookie(request: Request, call_next: Any) -> Response:
+        response = await call_next(request)
+        # Mint the session cookie only on HUD GETs. Never on /v0/state (queue dump)
+        # and never on HITL 401s, which would leak the token in Set-Cookie.
+        if request.method != "GET":
+            return response
+        path = request.url.path
+        if path.startswith("/v0/"):
+            return response
+        return _attach_desk_cookie(bot, response)
+
+    def _require_hitl_token(request: Request) -> None:
+        expected = str(getattr(bot.settings, "desk_token", "") or "")
+        got = request.headers.get("x-desk-token") or request.cookies.get("desk_token") or ""
+        if not expected or not hmac.compare_digest(got, expected):
+            raise HTTPException(status_code=401, detail="HITL requires X-Desk-Token")
+        if bot.settings.live_submit and not getattr(
+            bot.settings, "desk_token_from_operator", False
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="HITL approve disabled for --demo-submit without DESK_TOKEN",
+            )
 
     @app.get("/api/health")
     def health() -> dict[str, object]:
@@ -103,7 +154,8 @@ def create_app(bot: Any, hub: HudHub, history: MidHistory) -> FastAPI:
         return payload
 
     @app.post("/v0/hitl/{intent_id}")
-    def v0_hitl(intent_id: str, body: HitlDecisionBody) -> dict[str, Any]:
+    def v0_hitl(intent_id: str, body: HitlDecisionBody, request: Request) -> dict[str, Any]:
+        _require_hitl_token(request)
         if not hasattr(bot, "apply_hitl_decision"):
             raise HTTPException(status_code=501, detail="HITL desk not attached")
         try:

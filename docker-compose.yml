@@ -10,7 +10,7 @@ services:
       KALSHI_PAPER_TAPE: "${KALSHI_PAPER_TAPE:-true}"
       KALSHI_LOG_JSON: "true"
       KALSHI_HUD: "true"
-    command: ["kalshi-pbot", "hud"]
+    command: ["kalshi-pbot", "hud", "--host", "0.0.0.0"]
     ports:
       - "8080:8080"
     volumes:

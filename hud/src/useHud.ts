@@ -42,7 +42,7 @@ export function useHud(): {
     const startPoll = () => {
       const tick = async () => {
         try {
-          const res = await fetch("/api/snapshot");
+          const res = await fetch("/api/snapshot", { credentials: "same-origin" });
           if (res.ok) apply((await res.json()) as HudSnapshot);
         } catch {
           /* desk still booting */
@@ -75,6 +75,7 @@ export function useHud(): {
   const tripKill = useCallback(async () => {
     const res = await fetch("/api/kill", {
       method: "POST",
+      credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ reason: "manual" }),
     });
@@ -94,11 +95,12 @@ export function useHud(): {
   const decideHitl = useCallback(async (intentId: string, decision: "approve" | "deny") => {
     const res = await fetch(`/v0/hitl/${intentId}`, {
       method: "POST",
+      credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ decision }),
     });
     if (res.ok) {
-      const snapRes = await fetch("/api/snapshot");
+      const snapRes = await fetch("/api/snapshot", { credentials: "same-origin" });
       if (snapRes.ok) {
         const data = (await snapRes.json()) as HudSnapshot;
         setSnap(decorate(data));
