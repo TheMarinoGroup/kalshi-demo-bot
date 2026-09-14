@@ -293,6 +293,12 @@ class RiskEngine:
         now: datetime | None = None,
     ) -> RiskDecision:
         self.maybe_trip_limits(snapshot)
+        if not snapshot.ready_to_trade:
+            return RiskDecision(
+                False,
+                RejectReason.NOT_READY,
+                "reconcile not ready — no new risk until exchange snapshot succeeds",
+            )
         if snapshot.kill_active or self.kill_active:
             if intent.kind in {IntentKind.FLATTEN, IntentKind.CANCEL}:
                 return RiskDecision(True, RejectReason.OK, "flatten_during_kill")

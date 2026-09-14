@@ -132,6 +132,10 @@ class Settings(BaseSettings):
     tape_path: str = "data/tape.jsonl"
     # Daily-loss / manual kill persist so a HUD watchdog restart cannot clear the latch.
     kill_latch_path: str = "data/kill-latch.json"
+    # Cancel leftover resting orders on watched series after reconcile.
+    # Default safe (off). Honored only for --demo-submit on demo hosts.
+    # Production never auto-cancels, even if this is true.
+    cancel_orphans: bool = False
 
     log_level: str = "INFO"
     log_json: bool = False

@@ -52,6 +52,7 @@ RETRYABLE_STATUS_CODES = frozenset({429, 502, 503, 504})
 HTTP_MAX_ATTEMPTS = 6
 HTTP_RETRY_BASE_SECONDS = 2.0
 HTTP_RETRY_CAP_SECONDS = 45.0
+PAGINATE_MAX_PAGES = 50
 
 
 def parse_retry_after(response: httpx.Response) -> float | None:
@@ -357,6 +358,56 @@ class KalshiRestClient:
 
     def get_resting_orders(self) -> JsonDict:
         return self.get_json("/portfolio/orders", params={"status": "resting"})
+
+    def _paginate_list(
+        self,
+        path: str,
+        *,
+        list_key: str,
+        params: dict[str, Any] | None = None,
+        aliases: tuple[str, ...] = (),
+    ) -> list[JsonDict]:
+        """Walk cursor pages. Overflow or a missing list is fail-closed for reconcile."""
+        items: list[JsonDict] = []
+        cursor: str | None = None
+        query = dict(params or {})
+        for _page in range(PAGINATE_MAX_PAGES):
+            page_params = dict(query)
+            if cursor:
+                page_params["cursor"] = cursor
+            data = self.get_json(path, params=page_params)
+            chunk = data.get(list_key)
+            if chunk is None:
+                for alias in aliases:
+                    chunk = data.get(alias)
+                    if chunk is not None:
+                        break
+            if chunk is None:
+                raise RuntimeError(f"partial {path} response: missing {list_key}")
+            items.extend(chunk)
+            cursor = data.get("cursor") or None
+            if not cursor:
+                return items
+        raise RuntimeError(
+            f"partial {path} response: pagination exceeded {PAGINATE_MAX_PAGES} pages"
+        )
+
+    def list_market_positions(self) -> list[JsonDict]:
+        """All non-zero market positions via GET /portfolio/positions (paginated)."""
+        return self._paginate_list(
+            "/portfolio/positions",
+            list_key="market_positions",
+            params={"limit": 200, "count_filter": "position"},
+            aliases=("positions",),
+        )
+
+    def list_resting_orders(self) -> list[JsonDict]:
+        """All resting orders via GET /portfolio/orders?status=resting (paginated)."""
+        return self._paginate_list(
+            "/portfolio/orders",
+            list_key="orders",
+            params={"limit": 200, "status": "resting"},
+        )
 
     def create_order(self, body: JsonDict) -> httpx.Response:
         if self.settings.paper_tape or self.settings.dry_run:

@@ -47,6 +47,7 @@ class RejectReason(StrEnum):
     CONCURRENT_WINDOWS = "concurrent_windows"
     ONESIDED_CAP = "onesided_cap"
     UNPAIRED_EXISTS = "unpaired_exists"
+    NOT_READY = "not_ready"
     INVALID = "invalid"
 
 
@@ -341,6 +342,7 @@ class PortfolioSnapshot:
     resting: tuple[RestingOrder, ...]
     kill_active: bool
     kill_reason: str = ""
+    ready_to_trade: bool = True
 
 
 @dataclass(frozen=True)

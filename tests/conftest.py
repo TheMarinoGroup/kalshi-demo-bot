@@ -91,6 +91,7 @@ def empty_snapshot(settings: Settings, **kwargs: object) -> PortfolioSnapshot:
         resting=kwargs.get("resting", snap.resting),  # type: ignore[arg-type]
         kill_active=kwargs.get("kill_active", snap.kill_active),  # type: ignore[arg-type]
         kill_reason=kwargs.get("kill_reason", snap.kill_reason),  # type: ignore[arg-type]
+        ready_to_trade=kwargs.get("ready_to_trade", snap.ready_to_trade),  # type: ignore[arg-type]
     )
 
 
