@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { withPreviewActivity } from "./preview";
 import type { HudSnapshot } from "./types";
 
@@ -21,7 +21,9 @@ export function useHud(): {
   const [snap, setSnap] = useState<HudSnapshot | null>(null);
   const [live, setLive] = useState(false);
   const [clock, setClock] = useState(() => new Date());
+  const tokenRef = useRef("");
   const decorate = useCallback((data: HudSnapshot) => {
+    if (data.desk_token) tokenRef.current = data.desk_token;
     return previewOn() ? withPreviewActivity(data) : data;
   }, []);
 
@@ -94,7 +96,10 @@ export function useHud(): {
   const decideHitl = useCallback(async (intentId: string, decision: "approve" | "deny") => {
     const res = await fetch(`/v0/hitl/${intentId}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-Desk-Token": tokenRef.current,
+      },
       body: JSON.stringify({ decision }),
     });
     if (res.ok) {

@@ -723,4 +723,5 @@ def build_snapshot(bot: Any, history: MidHistory, now: datetime | None = None) -
         "size": hitl_state["size"],
         "allow_production": hitl_state["allow_production"],
         "hitl_timeout_s": hitl_state.get("hitl_timeout_s", 60),
+        "desk_token": str(getattr(settings, "desk_token", "") or ""),
     }

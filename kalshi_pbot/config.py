@@ -19,6 +19,7 @@ Read-only prod WebSocket is opt-in via ``KALSHI_ALLOW_PROD_WS=1`` and does
 from __future__ import annotations
 
 import os
+import secrets
 from decimal import Decimal
 from functools import cached_property
 from typing import Literal
@@ -132,6 +133,10 @@ class Settings(BaseSettings):
     # Dig6 MM desk. PAPER auto-quotes. HITL queues new-risk ENTRY. LIVE → LIVE_BLOCKED.
     desk_mode: Literal["PAPER", "HITL", "LIVE_BLOCKED"] = "PAPER"
     hitl_timeout_seconds: int = 60
+    # Operator token for POST /v0/hitl. Auto-generated if unset (paper HUD).
+    # --demo-submit HITL approve requires this to be set explicitly (DESK_TOKEN).
+    desk_token: str = ""
+    desk_token_from_operator: bool = False
     taker_pair_arb: bool = False
     tick_size: Decimal = Decimal("0.01")
     improve_ticks: int = 0
@@ -205,6 +210,15 @@ class Settings(BaseSettings):
             if env_t:
                 data = dict(data)
                 data["hitl_timeout_seconds"] = env_t
+        token_env = os.environ.get("DESK_TOKEN") or os.environ.get("KALSHI_DESK_TOKEN")
+        supplied = data.get("desk_token")
+        if supplied in (None, "") and token_env:
+            data = dict(data)
+            data["desk_token"] = token_env
+            supplied = token_env
+        if supplied not in (None, ""):
+            data = dict(data)
+            data["desk_token_from_operator"] = True
         return data
 
     @field_validator("desk_mode", mode="before")
@@ -234,6 +248,8 @@ class Settings(BaseSettings):
             )
         if self.hitl_timeout_seconds <= 0:
             raise ValueError("hitl_timeout_seconds must be > 0")
+        if not (self.desk_token or "").strip():
+            self.desk_token = secrets.token_urlsafe(24)
         if self.daily_loss_limit <= self.clip and (
             self.soft_onesided <= 0 or self.max_unpaired_age_seconds <= 0
         ):
